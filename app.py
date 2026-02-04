@@ -1116,7 +1116,6 @@ def main():
                 
                 if st.button("📥 GERAR PLANILHA DE EVASÃO COMPLETA", 
                            type="primary", 
-                           use_container_width=True,
                            use_container_width=True):
                     
                     with st.spinner("Gerando planilha no formato exato..."):
