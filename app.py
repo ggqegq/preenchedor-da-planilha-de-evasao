@@ -12,9 +12,10 @@ import time
 import io
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
-from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.utils import get_column_letter
 import re
 from datetime import datetime
+from collections import defaultdict
 
 # Configuração da página
 st.set_page_config(
@@ -30,79 +31,74 @@ ADMIN_ACAD_URL = "https://app.uff.br/graduacao/administracaoacademica"
 RELATORIOS_URL = f"{ADMIN_ACAD_URL}/relatorios/listagens_alunos"
 
 # Constantes de cursos e desdobramentos
-CURSOS = {
-    "Química": {
-        "codigo": "quimica",
-        "desdobramentos": {
-            "Licenciatura": "12700",
-            "Bacharelado": "312700"
-        }
-    },
-    "Química Industrial": {
-        "codigo": "quimica_industrial",
-        "desdobramentos": {
-            "Bacharelado Q. Industrial": "12709"
-        }
-    }
+CURSOS_CONFIG = {
+    "Licenciatura Química": {"codigo": "12700", "col_ac": 2, "col_aa": 6},
+    "Bacharel Química": {"codigo": "312700", "col_ac": 3, "col_aa": 7},
+    "Bacharel Q Industrial": {"codigo": "12709", "col_ac": 4, "col_aa": 8}
 }
 
-# Mapeamento de situações
+# Mapeamento de situações para categorias
 SITUACOES_INSCRITOS = ["Inscrito", "Concluinte", "Pendente"]
 SITUACOES_TRANCADOS = ["Trancado"]
 SITUACOES_FORMADOS = ["Permanência de Vínculo", "Formado"]
 
-# Motivos de cancelamento
-MOTIVOS_CANCELAMENTO = {
-    "Cancelamento por Solicitação Oficial": "Solicitação Oficial",
-    "Cancelamento por Abandono": "Abandono",
-    "Cancelamento por Insuficiência de Aproveitamento": "Insuficiência de Aproveitamento",
-    "Cancelamento Ingressante por Insuficiência de Aproveitamento": "Ingressante - Insuf. Aproveit.",
-    "Cancelamento por Mudança de Curso": "Mudança de Curso",
-    "Cancelamento por Tempo Máximo": "Tempo Máximo",
-    "Cancelamento por Reprovações Consecutivas": "Reprovações Consecutivas"
-}
+# Motivos de cancelamento - ordem conforme planilha
+MOTIVOS_CANCELAMENTO = [
+    ("Solicitação Oficial", ["Cancelamento por Solicitação Oficial"]),
+    ("Abandono", ["Cancelamento por Abandono"]),
+    ("Insuficiência de Aproveitamento", ["Cancelamento por Insuficiência de Aproveitamento"]),
+    ("Ingressante - Insuf. Aproveit.", ["Cancelamento Ingressante por Insuficiência de Aproveitamento"]),
+    ("Mudança de Curso", ["Cancelamento por Mudança de Curso"]),
+]
 
 
 def classificar_modalidade(codigo_modalidade):
     """
     Classifica a modalidade de ingresso.
-    Código iniciando com 'A' → Ampla Concorrência
-    Código iniciando com 'L' → Ações Afirmativas
+    Código iniciando com 'A' → Ampla Concorrência (AC)
+    Código iniciando com 'L' → Ações Afirmativas (AA)
     """
-    if not codigo_modalidade:
-        return "Outros"
+    if not codigo_modalidade or pd.isna(codigo_modalidade):
+        return "AC"  # Default para Ampla Concorrência
     
     codigo = str(codigo_modalidade).strip().upper()
     
-    if codigo.startswith("A"):
-        return "Ampla Concorrência"
-    elif codigo.startswith("L"):
-        return "Ações Afirmativas"
+    if codigo.startswith("L"):
+        return "AA"
     else:
-        return "Outros"
+        return "AC"
 
 
-def normalizar_situacao(situacao):
-    """Normaliza as legendas de situação"""
+def categorizar_situacao(situacao):
+    """Categoriza a situação do aluno"""
+    if not situacao or pd.isna(situacao):
+        return "Outros", None
+    
     situacao = str(situacao).strip()
     
+    # Verifica se é inscrito/ativo
     if situacao in SITUACOES_INSCRITOS:
-        return "Inscrito"
-    elif situacao in SITUACOES_TRANCADOS:
-        return "Trancado"
-    elif situacao in SITUACOES_FORMADOS:
-        return "Formado"
+        return "Inscrito", None
     
-    # Verifica se é um tipo de cancelamento
-    for motivo_original, motivo_normalizado in MOTIVOS_CANCELAMENTO.items():
-        if motivo_original.lower() in situacao.lower():
-            return f"Cancelamento - {motivo_normalizado}"
+    # Verifica se é trancado
+    if situacao in SITUACOES_TRANCADOS:
+        return "Trancado", None
+    
+    # Verifica se é formado
+    if situacao in SITUACOES_FORMADOS:
+        return "Formado", None
+    
+    # Verifica cancelamentos
+    for motivo_nome, situacoes_match in MOTIVOS_CANCELAMENTO:
+        for s in situacoes_match:
+            if s.lower() in situacao.lower() or situacao.lower() in s.lower():
+                return "Cancelamento", motivo_nome
     
     # Se contém "cancelamento" mas não está mapeado
     if "cancelamento" in situacao.lower():
-        return "Cancelamento - Outros"
+        return "Cancelamento", "Outros"
     
-    return situacao
+    return "Outros", None
 
 
 class SistemaAcademicoUFF:
@@ -111,7 +107,7 @@ class SistemaAcademicoUFF:
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         })
         self.logged_in = False
         self.csrf_token = None
@@ -145,7 +141,7 @@ class SistemaAcademicoUFF:
             response = self.session.post(action_url, data=login_data, allow_redirects=True)
             
             # Verifica se o login foi bem-sucedido
-            if "Administração Acadêmica" in response.text and "Sair" in response.text:
+            if "Administração Acadêmica" in response.text or "Sair" in response.text:
                 self.logged_in = True
                 
                 # Extrai o token CSRF para requisições futuras
@@ -199,13 +195,10 @@ class SistemaAcademicoUFF:
                 allow_redirects=True
             )
             
-            # Verifica se o relatório foi gerado
             if response.status_code == 200:
-                # Pode retornar uma página de aguarde ou o próprio arquivo
                 if 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' in response.headers.get('Content-Type', ''):
                     return response.content, "Relatório gerado com sucesso"
                 else:
-                    # Provavelmente é uma página de status, precisa aguardar
                     return self._aguardar_relatorio(response)
             
             return None, "Erro ao gerar relatório"
@@ -218,22 +211,18 @@ class SistemaAcademicoUFF:
         try:
             soup = BeautifulSoup(initial_response.text, 'html.parser')
             
-            # Procura o ID do relatório
             status_container = soup.find('div', {'id': 'statusUpdateContainer'})
             if status_container:
                 relatorio_id = status_container.get('data-id')
                 
-                # Aguarda até 5 minutos (300 segundos)
                 for _ in range(60):
                     time.sleep(5)
                     
-                    # Verifica o status do relatório
                     status_response = self.session.get(
                         f"{ADMIN_ACAD_URL}/relatorios/{relatorio_id}"
                     )
                     
                     if 'download' in status_response.text.lower():
-                        # O relatório está pronto
                         download_response = self.session.get(
                             f"{ADMIN_ACAD_URL}/relatorios/{relatorio_id}/download"
                         )
@@ -249,104 +238,96 @@ class SistemaAcademicoUFF:
             return None, f"Erro ao aguardar relatório: {str(e)}"
 
 
-def processar_dados_relatorio(df):
-    """Processa os dados do relatório conforme as regras especificadas"""
-    
-    # Normaliza as colunas
-    df.columns = df.columns.str.strip()
-    
-    # Renomeia colunas se necessário
-    colunas_map = {
-        'Matrícula': 'matricula',
-        'Nome': 'nome',
-        'Situação': 'situacao',
-        'Turno': 'turno',
-        'Desvinculado em': 'desvinculado_em',
-        'Modalidade de Ingresso': 'modalidade_ingresso'
+def processar_relatorio(df, curso_nome):
+    """
+    Processa um DataFrame de relatório e retorna contagens por modalidade.
+    """
+    resultados = {
+        "AC": {
+            "total_ingressantes": 0,
+            "cancelamentos": defaultdict(int),
+            "inscritos": 0,
+            "trancados": 0,
+            "formados": 0
+        },
+        "AA": {
+            "total_ingressantes": 0,
+            "cancelamentos": defaultdict(int),
+            "inscritos": 0,
+            "trancados": 0,
+            "formados": 0
+        }
     }
     
-    df = df.rename(columns={k: v for k, v in colunas_map.items() if k in df.columns})
+    # Encontra as colunas relevantes
+    col_situacao = None
+    col_modalidade = None
     
-    # Normaliza situações
-    if 'situacao' in df.columns:
-        df['situacao_normalizada'] = df['situacao'].apply(normalizar_situacao)
+    for col in df.columns:
+        col_lower = str(col).lower().strip()
+        if 'situação' in col_lower or 'situacao' in col_lower:
+            col_situacao = col
+        if 'modalidade' in col_lower:
+            col_modalidade = col
     
-    # Classifica modalidade
-    if 'modalidade_ingresso' in df.columns:
-        df['tipo_modalidade'] = df['modalidade_ingresso'].apply(classificar_modalidade)
+    if col_situacao is None:
+        return resultados
     
-    return df
+    # Processa cada linha
+    for idx, row in df.iterrows():
+        # Classifica modalidade
+        modalidade = "AC"
+        if col_modalidade and col_modalidade in row:
+            modalidade = classificar_modalidade(row[col_modalidade])
+        
+        # Conta ingressante
+        resultados[modalidade]["total_ingressantes"] += 1
+        
+        # Categoriza situação
+        categoria, motivo = categorizar_situacao(row[col_situacao])
+        
+        if categoria == "Inscrito":
+            resultados[modalidade]["inscritos"] += 1
+        elif categoria == "Trancado":
+            resultados[modalidade]["trancados"] += 1
+        elif categoria == "Formado":
+            resultados[modalidade]["formados"] += 1
+        elif categoria == "Cancelamento" and motivo:
+            resultados[modalidade]["cancelamentos"][motivo] += 1
+    
+    return resultados
 
 
-def calcular_metricas(df, curso_nome, desdobramento_nome):
-    """Calcula as métricas de evasão"""
+def gerar_planilha_evasao(dados_por_periodo_curso):
+    """
+    Gera a planilha de evasão no formato exato do modelo fornecido.
     
-    metricas = {
-        'curso': f"{curso_nome} - {desdobramento_nome}",
-        'total_ingressantes': len(df),
-        'cancelamentos': {},
-        'matriculas_ativas': {},
-        'situacao_atual': {},
-        'metricas_finais': {}
+    dados_por_periodo_curso: dict com estrutura:
+    {
+        "2025.1": {
+            "Licenciatura Química": {"AC": {...}, "AA": {...}},
+            "Bacharel Química": {"AC": {...}, "AA": {...}},
+            "Bacharel Q Industrial": {"AC": {...}, "AA": {...}}
+        },
+        ...
     }
-    
-    # Agrupa por modalidade
-    for tipo_mod in ['Ampla Concorrência', 'Ações Afirmativas']:
-        df_mod = df[df['tipo_modalidade'] == tipo_mod] if 'tipo_modalidade' in df.columns else df
-        
-        # Total de ingressantes por modalidade
-        metricas['total_ingressantes_' + tipo_mod.replace(' ', '_').lower()] = len(df_mod)
-        
-        # Cancelamentos por tipo
-        cancelamentos = {}
-        for motivo in MOTIVOS_CANCELAMENTO.values():
-            situacao_busca = f"Cancelamento - {motivo}"
-            cancelamentos[motivo] = len(df_mod[df_mod['situacao_normalizada'] == situacao_busca]) if 'situacao_normalizada' in df_mod.columns else 0
-        
-        # Outros cancelamentos
-        cancelamentos['Outros'] = len(df_mod[df_mod['situacao_normalizada'] == 'Cancelamento - Outros']) if 'situacao_normalizada' in df_mod.columns else 0
-        
-        metricas['cancelamentos'][tipo_mod] = cancelamentos
-        
-        # Matrículas ativas
-        inscritos = len(df_mod[df_mod['situacao_normalizada'] == 'Inscrito']) if 'situacao_normalizada' in df_mod.columns else 0
-        trancados = len(df_mod[df_mod['situacao_normalizada'] == 'Trancado']) if 'situacao_normalizada' in df_mod.columns else 0
-        
-        metricas['matriculas_ativas'][tipo_mod] = {
-            'inscritos': inscritos,
-            'trancados': trancados,
-            'total': inscritos + trancados
-        }
-        
-        # Alunos formados
-        formados = len(df_mod[df_mod['situacao_normalizada'] == 'Formado']) if 'situacao_normalizada' in df_mod.columns else 0
-        metricas['situacao_atual'][tipo_mod] = {
-            'matriculas_ativas': inscritos + trancados,
-            'formados': formados
-        }
-        
-        # Métricas finais
-        total = len(df_mod)
-        total_cancelamentos = sum(cancelamentos.values())
-        
-        metricas['metricas_finais'][tipo_mod] = {
-            'percentual_cancelamento': (total_cancelamentos / total * 100) if total > 0 else 0,
-            'percentual_formados': (formados / total * 100) if total > 0 else 0
-        }
-    
-    return metricas
-
-
-def gerar_planilha_evasao(dados_por_curso, periodo_inicial, periodo_final):
-    """Gera a planilha de evasão no formato especificado"""
+    """
     
     wb = Workbook()
     
     # Estilos
-    header_font = Font(bold=True, color="FFFFFF")
     header_fill_azul = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
     header_fill_verde = PatternFill(start_color="548235", end_color="548235", fill_type="solid")
     header_fill_laranja = PatternFill(start_color="C65911", end_color="C65911", fill_type="solid")
+    header_fill_cinza = PatternFill(start_color="808080", end_color="808080", fill_type="solid")
+    
+    fill_vermelho = PatternFill(start_color="FF6B6B", end_color="FF6B6B", fill_type="solid")
+    fill_verde_claro = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")
+    fill_amarelo = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
+    
+    header_font_branco = Font(bold=True, color="FFFFFF")
+    header_font_preto = Font(bold=True, color="000000")
+    normal_font = Font(color="000000")
     
     border = Border(
         left=Side(style='thin'),
@@ -356,191 +337,544 @@ def gerar_planilha_evasao(dados_por_curso, periodo_inicial, periodo_final):
     )
     
     center_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    left_alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
     
-    # Remove a planilha padrão
+    # Remove planilha padrão
     wb.remove(wb.active)
     
-    # Para cada período
-    for periodo, dados_cursos in dados_por_curso.items():
-        ws = wb.create_sheet(title=periodo)
+    # Ordena períodos do mais recente para o mais antigo
+    periodos_ordenados = sorted(dados_por_periodo_curso.keys(), reverse=True)
+    
+    # Cria aba de Gráficos primeiro (será preenchida depois)
+    ws_graficos = wb.create_sheet(title="Gráficos")
+    ws_graficos['A1'] = "Gráficos serão adicionados manualmente"
+    
+    # Cria aba Acumulada
+    ws_acumulado = wb.create_sheet(title=f"Acumulado de {periodos_ordenados[0]} a {periodos_ordenados[-1]}")
+    
+    # Para cada período, cria uma aba
+    for periodo in periodos_ordenados:
+        dados_cursos = dados_por_periodo_curso[periodo]
         
-        # Cabeçalho principal
+        # Nome da aba (formato: 2025.1)
+        nome_aba = periodo.replace("/", ".").replace("°", "")
+        ws = wb.create_sheet(title=nome_aba)
+        
+        # === LINHA 1: Título principal ===
         ws.merge_cells('A1:K1')
-        ws['A1'] = f"QUÍMICA IQ - LEVANTAMENTO MATRÍCULAS SISU"
-        ws['A1'].font = Font(bold=True, size=14)
-        ws['A1'].fill = header_fill_azul
-        ws['A1'].font = header_font
-        ws['A1'].alignment = center_alignment
+        cell = ws['A1']
+        cell.value = "QUÍMICA IQ - LEVANTAMENTO MATRÍCULAS SISU"
+        cell.font = header_font_branco
+        cell.fill = header_fill_azul
+        cell.alignment = center_alignment
+        cell.border = border
         
-        # Cabeçalhos das colunas
-        headers_row2 = ['Modalidade', 'AMPLA CONCORRÊNCIA', '', '', '', 'AÇÕES AFIRMATIVAS', '', '', '', 'TOTAIS', '']
-        headers_row3 = ['Curso', 'Licenciatura Química', 'Bacharel Química', 'Bacharel Q Industrial', 'TOTAL (AC)',
-                        'Licenciatura Química', 'Bacharel Química', 'Bacharel Q Industrial', 'TOTAL (AA)',
-                        'TOTAL GERAL', '% GERAL']
+        # === LINHA 2: Cabeçalho de grupos ===
+        # Coluna A vazia
+        ws.cell(row=2, column=1, value="Modalidade").font = header_font_branco
+        ws.cell(row=2, column=1).fill = header_fill_azul
+        ws.cell(row=2, column=1).alignment = center_alignment
+        ws.cell(row=2, column=1).border = border
         
-        for col, header in enumerate(headers_row2, 1):
-            cell = ws.cell(row=2, column=col, value=header)
-            cell.font = header_font
-            cell.fill = header_fill_azul
-            cell.alignment = center_alignment
-            cell.border = border
+        # AMPLA CONCORRÊNCIA (B-E)
+        ws.merge_cells('B2:E2')
+        cell = ws['B2']
+        cell.value = "AMPLA CONCORRÊNCIA"
+        cell.font = header_font_branco
+        cell.fill = header_fill_azul
+        cell.alignment = center_alignment
+        for col in range(2, 6):
+            ws.cell(row=2, column=col).border = border
         
-        for col, header in enumerate(headers_row3, 1):
+        # AÇÕES AFIRMATIVAS (F-I)
+        ws.merge_cells('F2:I2')
+        cell = ws['F2']
+        cell.value = "AÇÕES AFIRMATIVAS"
+        cell.font = header_font_branco
+        cell.fill = header_fill_verde
+        cell.alignment = center_alignment
+        for col in range(6, 10):
+            ws.cell(row=2, column=col).border = border
+        
+        # TOTAIS (J-K)
+        ws.merge_cells('J2:K2')
+        cell = ws['J2']
+        cell.value = "TOTAIS"
+        cell.font = header_font_branco
+        cell.fill = header_fill_laranja
+        cell.alignment = center_alignment
+        for col in range(10, 12):
+            ws.cell(row=2, column=col).border = border
+        
+        # === LINHA 3: Cabeçalho de cursos ===
+        headers_row3 = [
+            ("Curso", header_fill_azul),
+            ("Licenciatura Química", header_fill_azul),
+            ("Bacharel Química", header_fill_azul),
+            ("Bacharel Q Industrial", header_fill_azul),
+            ("TOTAL (AC)", header_fill_azul),
+            ("Licenciatura Química", header_fill_verde),
+            ("Bacharel Química", header_fill_verde),
+            ("Bacharel Q Industrial", header_fill_verde),
+            ("TOTAL (AA)", header_fill_verde),
+            ("TOTAL GERAL", header_fill_laranja),
+            ("% GERAL", header_fill_laranja)
+        ]
+        
+        for col, (header, fill) in enumerate(headers_row3, 1):
             cell = ws.cell(row=3, column=col, value=header)
-            cell.font = header_font
-            cell.fill = header_fill_azul if col <= 5 else (header_fill_verde if col <= 9 else header_fill_laranja)
+            cell.font = header_font_branco
+            cell.fill = fill
             cell.alignment = center_alignment
             cell.border = border
         
-        # Mescla células de cabeçalho
-        ws.merge_cells('B2:E2')  # Ampla Concorrência
-        ws.merge_cells('F2:I2')  # Ações Afirmativas
-        ws.merge_cells('J2:K2')  # Totais
+        # Extrai dados de cada curso
+        lic_quim = dados_cursos.get("Licenciatura Química", {"AC": {}, "AA": {}})
+        bach_quim = dados_cursos.get("Bacharel Química", {"AC": {}, "AA": {}})
+        bach_ind = dados_cursos.get("Bacharel Q Industrial", {"AC": {}, "AA": {}})
         
-        # Preenche os dados
+        # Função auxiliar para obter valor com default
+        def get_val(dados, modalidade, chave, sub_chave=None):
+            if modalidade not in dados:
+                dados[modalidade] = {"total_ingressantes": 0, "cancelamentos": {}, "inscritos": 0, "trancados": 0, "formados": 0}
+            if sub_chave:
+                return dados[modalidade].get(chave, {}).get(sub_chave, 0)
+            return dados[modalidade].get(chave, 0)
+        
+        # === LINHA 4: Total de Ingressantes ===
         row = 4
-        
-        # Total de Ingressantes
         ws.cell(row=row, column=1, value="Total de Ingressantes").border = border
-        row += 1
+        ws.cell(row=row, column=1).alignment = left_alignment
         
-        # Cancelamentos
-        ws.merge_cells(f'A{row}:A{row+6}')
-        ws.cell(row=row, column=1, value="CANCELAMENTOS").border = border
+        # Valores AC
+        val_lic_ac = get_val(lic_quim, "AC", "total_ingressantes")
+        val_bach_ac = get_val(bach_quim, "AC", "total_ingressantes")
+        val_ind_ac = get_val(bach_ind, "AC", "total_ingressantes")
+        total_ac = val_lic_ac + val_bach_ac + val_ind_ac
         
-        motivos = ['Solicitação Oficial', 'Abandono', 'Insuficiência de Aproveitamento',
-                   'Ingressante - Insuf. Aproveit.', 'Mudança de Curso', 'TOTAL CANCELAMENTOS']
+        # Valores AA
+        val_lic_aa = get_val(lic_quim, "AA", "total_ingressantes")
+        val_bach_aa = get_val(bach_quim, "AA", "total_ingressantes")
+        val_ind_aa = get_val(bach_ind, "AA", "total_ingressantes")
+        total_aa = val_lic_aa + val_bach_aa + val_ind_aa
         
-        for motivo in motivos:
-            ws.cell(row=row, column=1, value=motivo).border = border
+        total_geral = total_ac + total_aa
+        
+        valores_row4 = [val_lic_ac, val_bach_ac, val_ind_ac, total_ac, 
+                        val_lic_aa, val_bach_aa, val_ind_aa, total_aa,
+                        total_geral, "-"]
+        
+        for col, val in enumerate(valores_row4, 2):
+            cell = ws.cell(row=row, column=col, value=val)
+            cell.alignment = center_alignment
+            cell.border = border
+        
+        # === LINHA 5: Seção CANCELAMENTOS ===
+        row = 5
+        ws.merge_cells(f'A{row}:K{row}')
+        cell = ws.cell(row=row, column=1, value="CANCELAMENTOS")
+        cell.font = header_font_preto
+        cell.fill = header_fill_cinza
+        cell.alignment = center_alignment
+        cell.border = border
+        
+        # === LINHAS 6-10: Motivos de cancelamento ===
+        motivos_ordem = [
+            "Solicitação Oficial",
+            "Abandono", 
+            "Insuficiência de Aproveitamento",
+            "Ingressante - Insuf. Aproveit.",
+            "Mudança de Curso"
+        ]
+        
+        for motivo in motivos_ordem:
             row += 1
+            ws.cell(row=row, column=1, value=motivo).border = border
+            ws.cell(row=row, column=1).alignment = left_alignment
+            
+            # Valores AC
+            val_lic_ac = get_val(lic_quim, "AC", "cancelamentos", motivo)
+            val_bach_ac = get_val(bach_quim, "AC", "cancelamentos", motivo)
+            val_ind_ac = get_val(bach_ind, "AC", "cancelamentos", motivo)
+            total_ac = val_lic_ac + val_bach_ac + val_ind_ac
+            
+            # Valores AA
+            val_lic_aa = get_val(lic_quim, "AA", "cancelamentos", motivo)
+            val_bach_aa = get_val(bach_quim, "AA", "cancelamentos", motivo)
+            val_ind_aa = get_val(bach_ind, "AA", "cancelamentos", motivo)
+            total_aa = val_lic_aa + val_bach_aa + val_ind_aa
+            
+            total_geral = total_ac + total_aa
+            
+            # Calcula percentual
+            total_ingressantes = dados_cursos.get("_total_geral", total_geral) or 1
+            pct = f"{(total_geral / total_ingressantes * 100):.2f}%" if total_ingressantes > 0 else "0,00%"
+            
+            valores = [val_lic_ac, val_bach_ac, val_ind_ac, total_ac,
+                      val_lic_aa, val_bach_aa, val_ind_aa, total_aa,
+                      total_geral, pct]
+            
+            for col, val in enumerate(valores, 2):
+                cell = ws.cell(row=row, column=col, value=val)
+                cell.alignment = center_alignment
+                cell.border = border
         
-        # Matrículas Ativas
-        ws.cell(row=row, column=1, value="MATRÍCULAS ATIVAS").border = border
+        # === LINHA: TOTAL CANCELAMENTOS ===
+        row += 1
+        ws.cell(row=row, column=1, value="TOTAL CANCELAMENTOS").border = border
+        ws.cell(row=row, column=1).alignment = left_alignment
+        ws.cell(row=row, column=1).font = Font(bold=True)
+        
+        # Soma de todos os cancelamentos
+        def soma_cancelamentos(dados, modalidade):
+            if modalidade not in dados:
+                return 0
+            return sum(dados[modalidade].get("cancelamentos", {}).values())
+        
+        val_lic_ac = soma_cancelamentos(lic_quim, "AC")
+        val_bach_ac = soma_cancelamentos(bach_quim, "AC")
+        val_ind_ac = soma_cancelamentos(bach_ind, "AC")
+        total_ac = val_lic_ac + val_bach_ac + val_ind_ac
+        
+        val_lic_aa = soma_cancelamentos(lic_quim, "AA")
+        val_bach_aa = soma_cancelamentos(bach_quim, "AA")
+        val_ind_aa = soma_cancelamentos(bach_ind, "AA")
+        total_aa = val_lic_aa + val_bach_aa + val_ind_aa
+        
+        total_geral = total_ac + total_aa
+        total_ingressantes_geral = (get_val(lic_quim, "AC", "total_ingressantes") + 
+                                    get_val(bach_quim, "AC", "total_ingressantes") + 
+                                    get_val(bach_ind, "AC", "total_ingressantes") +
+                                    get_val(lic_quim, "AA", "total_ingressantes") + 
+                                    get_val(bach_quim, "AA", "total_ingressantes") + 
+                                    get_val(bach_ind, "AA", "total_ingressantes"))
+        
+        pct = f"{(total_geral / total_ingressantes_geral * 100):.2f}%" if total_ingressantes_geral > 0 else "0,00%"
+        
+        valores = [val_lic_ac, val_bach_ac, val_ind_ac, total_ac,
+                  val_lic_aa, val_bach_aa, val_ind_aa, total_aa,
+                  total_geral, pct]
+        
+        for col, val in enumerate(valores, 2):
+            cell = ws.cell(row=row, column=col, value=val)
+            cell.alignment = center_alignment
+            cell.border = border
+            cell.font = Font(bold=True)
+        
+        # === LINHA: Seção MATRÍCULAS ATIVAS ===
+        row += 1
+        ws.merge_cells(f'A{row}:K{row}')
+        cell = ws.cell(row=row, column=1, value="MATRÍCULAS ATIVAS")
+        cell.font = header_font_preto
+        cell.fill = header_fill_cinza
+        cell.alignment = center_alignment
+        cell.border = border
+        
+        # === LINHA: Inscritos ===
         row += 1
         ws.cell(row=row, column=1, value="Inscritos").border = border
+        ws.cell(row=row, column=1).alignment = left_alignment
+        
+        val_lic_ac = get_val(lic_quim, "AC", "inscritos")
+        val_bach_ac = get_val(bach_quim, "AC", "inscritos")
+        val_ind_ac = get_val(bach_ind, "AC", "inscritos")
+        total_ac = val_lic_ac + val_bach_ac + val_ind_ac
+        
+        val_lic_aa = get_val(lic_quim, "AA", "inscritos")
+        val_bach_aa = get_val(bach_quim, "AA", "inscritos")
+        val_ind_aa = get_val(bach_ind, "AA", "inscritos")
+        total_aa = val_lic_aa + val_bach_aa + val_ind_aa
+        
+        total_geral = total_ac + total_aa
+        pct = f"{(total_geral / total_ingressantes_geral * 100):.2f}%" if total_ingressantes_geral > 0 else "0,00%"
+        
+        valores = [val_lic_ac, val_bach_ac, val_ind_ac, total_ac,
+                  val_lic_aa, val_bach_aa, val_ind_aa, total_aa,
+                  total_geral, pct]
+        
+        for col, val in enumerate(valores, 2):
+            cell = ws.cell(row=row, column=col, value=val)
+            cell.alignment = center_alignment
+            cell.border = border
+        
+        # === LINHA: Trancados ===
         row += 1
         ws.cell(row=row, column=1, value="Trancados").border = border
+        ws.cell(row=row, column=1).alignment = left_alignment
+        
+        val_lic_ac = get_val(lic_quim, "AC", "trancados")
+        val_bach_ac = get_val(bach_quim, "AC", "trancados")
+        val_ind_ac = get_val(bach_ind, "AC", "trancados")
+        total_ac = val_lic_ac + val_bach_ac + val_ind_ac
+        
+        val_lic_aa = get_val(lic_quim, "AA", "trancados")
+        val_bach_aa = get_val(bach_quim, "AA", "trancados")
+        val_ind_aa = get_val(bach_ind, "AA", "trancados")
+        total_aa = val_lic_aa + val_bach_aa + val_ind_aa
+        
+        total_geral = total_ac + total_aa
+        pct = f"{(total_geral / total_ingressantes_geral * 100):.2f}%" if total_ingressantes_geral > 0 else "0,00%"
+        
+        valores = [val_lic_ac, val_bach_ac, val_ind_ac, total_ac,
+                  val_lic_aa, val_bach_aa, val_ind_aa, total_aa,
+                  total_geral, pct]
+        
+        for col, val in enumerate(valores, 2):
+            cell = ws.cell(row=row, column=col, value=val)
+            cell.alignment = center_alignment
+            cell.border = border
+        
+        # === LINHA: TOTAL MATRIC. ATIVAS ===
         row += 1
         ws.cell(row=row, column=1, value="TOTAL MATRIC. ATIVAS").border = border
-        row += 1
+        ws.cell(row=row, column=1).alignment = left_alignment
+        ws.cell(row=row, column=1).font = Font(bold=True)
         
-        # Situação Atual
-        ws.cell(row=row, column=1, value="SITUAÇÃO ATUAL").border = border
+        val_lic_ac = get_val(lic_quim, "AC", "inscritos") + get_val(lic_quim, "AC", "trancados")
+        val_bach_ac = get_val(bach_quim, "AC", "inscritos") + get_val(bach_quim, "AC", "trancados")
+        val_ind_ac = get_val(bach_ind, "AC", "inscritos") + get_val(bach_ind, "AC", "trancados")
+        total_ac = val_lic_ac + val_bach_ac + val_ind_ac
+        
+        val_lic_aa = get_val(lic_quim, "AA", "inscritos") + get_val(lic_quim, "AA", "trancados")
+        val_bach_aa = get_val(bach_quim, "AA", "inscritos") + get_val(bach_quim, "AA", "trancados")
+        val_ind_aa = get_val(bach_ind, "AA", "inscritos") + get_val(bach_ind, "AA", "trancados")
+        total_aa = val_lic_aa + val_bach_aa + val_ind_aa
+        
+        total_geral = total_ac + total_aa
+        pct = f"{(total_geral / total_ingressantes_geral * 100):.2f}%" if total_ingressantes_geral > 0 else "0,00%"
+        
+        valores = [val_lic_ac, val_bach_ac, val_ind_ac, total_ac,
+                  val_lic_aa, val_bach_aa, val_ind_aa, total_aa,
+                  total_geral, pct]
+        
+        for col, val in enumerate(valores, 2):
+            cell = ws.cell(row=row, column=col, value=val)
+            cell.alignment = center_alignment
+            cell.border = border
+            cell.font = Font(bold=True)
+        
+        # === LINHA: Seção SITUAÇÃO ATUAL ===
+        row += 1
+        ws.merge_cells(f'A{row}:K{row}')
+        cell = ws.cell(row=row, column=1, value="SITUAÇÃO ATUAL")
+        cell.font = header_font_preto
+        cell.fill = header_fill_cinza
+        cell.alignment = center_alignment
+        cell.border = border
+        
+        # === LINHA: Matrículas Ativas (repetição) ===
         row += 1
         ws.cell(row=row, column=1, value="Matrículas Ativas").border = border
+        ws.cell(row=row, column=1).alignment = left_alignment
+        
+        val_lic_ac = get_val(lic_quim, "AC", "inscritos") + get_val(lic_quim, "AC", "trancados")
+        val_bach_ac = get_val(bach_quim, "AC", "inscritos") + get_val(bach_quim, "AC", "trancados")
+        val_ind_ac = get_val(bach_ind, "AC", "inscritos") + get_val(bach_ind, "AC", "trancados")
+        total_ac = val_lic_ac + val_bach_ac + val_ind_ac
+        
+        val_lic_aa = get_val(lic_quim, "AA", "inscritos") + get_val(lic_quim, "AA", "trancados")
+        val_bach_aa = get_val(bach_quim, "AA", "inscritos") + get_val(bach_quim, "AA", "trancados")
+        val_ind_aa = get_val(bach_ind, "AA", "inscritos") + get_val(bach_ind, "AA", "trancados")
+        total_aa = val_lic_aa + val_bach_aa + val_ind_aa
+        
+        total_geral = total_ac + total_aa
+        pct = f"{(total_geral / total_ingressantes_geral * 100):.2f}%" if total_ingressantes_geral > 0 else "0,00%"
+        
+        valores = [val_lic_ac, val_bach_ac, val_ind_ac, total_ac,
+                  val_lic_aa, val_bach_aa, val_ind_aa, total_aa,
+                  total_geral, pct]
+        
+        for col, val in enumerate(valores, 2):
+            cell = ws.cell(row=row, column=col, value=val)
+            cell.alignment = center_alignment
+            cell.border = border
+        
+        # === LINHA: Alunos Formados ===
         row += 1
         ws.cell(row=row, column=1, value="Alunos Formados").border = border
-        row += 1
+        ws.cell(row=row, column=1).alignment = left_alignment
         
-        # Métricas Finais
-        ws.cell(row=row, column=1, value="MÉTRICAS FINAIS (%)").border = border
+        val_lic_ac = get_val(lic_quim, "AC", "formados")
+        val_bach_ac = get_val(bach_quim, "AC", "formados")
+        val_ind_ac = get_val(bach_ind, "AC", "formados")
+        total_ac = val_lic_ac + val_bach_ac + val_ind_ac
+        
+        val_lic_aa = get_val(lic_quim, "AA", "formados")
+        val_bach_aa = get_val(bach_quim, "AA", "formados")
+        val_ind_aa = get_val(bach_ind, "AA", "formados")
+        total_aa = val_lic_aa + val_bach_aa + val_ind_aa
+        
+        total_geral = total_ac + total_aa
+        pct = f"{(total_geral / total_ingressantes_geral * 100):.2f}%" if total_ingressantes_geral > 0 else "0,00%"
+        
+        valores = [val_lic_ac, val_bach_ac, val_ind_ac, total_ac,
+                  val_lic_aa, val_bach_aa, val_ind_aa, total_aa,
+                  total_geral, pct]
+        
+        for col, val in enumerate(valores, 2):
+            cell = ws.cell(row=row, column=col, value=val)
+            cell.alignment = center_alignment
+            cell.border = border
+        
+        # === LINHA: Seção MÉTRICAS FINAIS (%) ===
+        row += 1
+        ws.merge_cells(f'A{row}:K{row}')
+        cell = ws.cell(row=row, column=1, value="MÉTRICAS FINAIS (%)")
+        cell.font = header_font_preto
+        cell.fill = header_fill_cinza
+        cell.alignment = center_alignment
+        cell.border = border
+        
+        # === LINHA: % Cancelamento ===
         row += 1
         ws.cell(row=row, column=1, value="% Cancelamento").border = border
-        row += 1
-        ws.cell(row=row, column=1, value="% de Alunos Formados").border = border
+        ws.cell(row=row, column=1).alignment = left_alignment
         
-        # Ajusta largura das colunas
-        ws.column_dimensions['A'].width = 25
-        for col in range(2, 12):
-            ws.column_dimensions[chr(64 + col)].width = 15
-    
-    # Cria aba de gráficos (placeholder)
-    ws_graficos = wb.create_sheet(title="Gráficos")
-    ws_graficos['A1'] = "Gráficos serão gerados aqui"
-    
-    # Cria aba acumulada
-    ws_acumulado = wb.create_sheet(title=f"Acumulado de {periodo_final} a {periodo_inicial}")
-    ws_acumulado['A1'] = "Dados acumulados"
-    
-    return wb
-
-
-def criar_planilha_demo(df_lista):
-    """Cria uma planilha demonstrativa com os dados processados"""
-    
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Dados Processados"
-    
-    # Estilos
-    header_font = Font(bold=True, color="FFFFFF")
-    header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
-    border = Border(
-        left=Side(style='thin'),
-        right=Side(style='thin'),
-        top=Side(style='thin'),
-        bottom=Side(style='thin')
-    )
-    
-    # Escreve os dados
-    for r_idx, row in enumerate(dataframe_to_rows(df_lista, index=False, header=True), 1):
-        for c_idx, value in enumerate(row, 1):
-            cell = ws.cell(row=r_idx, column=c_idx, value=value)
+        def calc_pct_cancelamento(dados, modalidade):
+            total_ing = get_val(dados, modalidade, "total_ingressantes")
+            total_canc = soma_cancelamentos(dados, modalidade)
+            if total_ing > 0:
+                return total_canc / total_ing * 100
+            return 0
+        
+        pct_lic_ac = calc_pct_cancelamento(lic_quim, "AC")
+        pct_bach_ac = calc_pct_cancelamento(bach_quim, "AC")
+        pct_ind_ac = calc_pct_cancelamento(bach_ind, "AC")
+        
+        pct_lic_aa = calc_pct_cancelamento(lic_quim, "AA")
+        pct_bach_aa = calc_pct_cancelamento(bach_quim, "AA")
+        pct_ind_aa = calc_pct_cancelamento(bach_ind, "AA")
+        
+        # Total AC e AA
+        total_ing_ac = (get_val(lic_quim, "AC", "total_ingressantes") + 
+                       get_val(bach_quim, "AC", "total_ingressantes") + 
+                       get_val(bach_ind, "AC", "total_ingressantes"))
+        total_canc_ac = (soma_cancelamentos(lic_quim, "AC") + 
+                        soma_cancelamentos(bach_quim, "AC") + 
+                        soma_cancelamentos(bach_ind, "AC"))
+        pct_total_ac = (total_canc_ac / total_ing_ac * 100) if total_ing_ac > 0 else 0
+        
+        total_ing_aa = (get_val(lic_quim, "AA", "total_ingressantes") + 
+                       get_val(bach_quim, "AA", "total_ingressantes") + 
+                       get_val(bach_ind, "AA", "total_ingressantes"))
+        total_canc_aa = (soma_cancelamentos(lic_quim, "AA") + 
+                        soma_cancelamentos(bach_quim, "AA") + 
+                        soma_cancelamentos(bach_ind, "AA"))
+        pct_total_aa = (total_canc_aa / total_ing_aa * 100) if total_ing_aa > 0 else 0
+        
+        pct_geral = ((total_canc_ac + total_canc_aa) / total_ingressantes_geral * 100) if total_ingressantes_geral > 0 else 0
+        
+        valores = [f"{pct_lic_ac:.2f}%", f"{pct_bach_ac:.2f}%", f"{pct_ind_ac:.2f}%", f"{pct_total_ac:.2f}%",
+                  f"{pct_lic_aa:.2f}%", f"{pct_bach_aa:.2f}%", f"{pct_ind_aa:.2f}%", f"{pct_total_aa:.2f}%",
+                  f"{pct_geral:.2f}%", "-"]
+        
+        for col, val in enumerate(valores, 2):
+            cell = ws.cell(row=row, column=col, value=val)
+            cell.alignment = center_alignment
             cell.border = border
-            if r_idx == 1:
-                cell.font = header_font
-                cell.fill = header_fill
-    
-    # Ajusta largura das colunas
-    for col in ws.columns:
-        max_length = 0
-        column = col[0].column_letter
-        for cell in col:
+            # Aplica cores condicionais
             try:
-                if len(str(cell.value)) > max_length:
-                    max_length = len(str(cell.value))
+                pct_val = float(val.replace("%", "").replace(",", "."))
+                if pct_val == 0:
+                    cell.fill = fill_verde_claro
+                elif pct_val < 10:
+                    cell.fill = fill_amarelo
+                else:
+                    cell.fill = fill_vermelho
             except:
                 pass
-        adjusted_width = min(max_length + 2, 50)
-        ws.column_dimensions[column].width = adjusted_width
+        
+        # === LINHA: % de Alunos Formados ===
+        row += 1
+        ws.cell(row=row, column=1, value="% de Alunos Formados").border = border
+        ws.cell(row=row, column=1).alignment = left_alignment
+        
+        def calc_pct_formados(dados, modalidade):
+            total_ing = get_val(dados, modalidade, "total_ingressantes")
+            total_form = get_val(dados, modalidade, "formados")
+            if total_ing > 0:
+                return total_form / total_ing * 100
+            return 0
+        
+        pct_lic_ac = calc_pct_formados(lic_quim, "AC")
+        pct_bach_ac = calc_pct_formados(bach_quim, "AC")
+        pct_ind_ac = calc_pct_formados(bach_ind, "AC")
+        
+        pct_lic_aa = calc_pct_formados(lic_quim, "AA")
+        pct_bach_aa = calc_pct_formados(bach_quim, "AA")
+        pct_ind_aa = calc_pct_formados(bach_ind, "AA")
+        
+        total_form_ac = (get_val(lic_quim, "AC", "formados") + 
+                        get_val(bach_quim, "AC", "formados") + 
+                        get_val(bach_ind, "AC", "formados"))
+        pct_total_ac = (total_form_ac / total_ing_ac * 100) if total_ing_ac > 0 else 0
+        
+        total_form_aa = (get_val(lic_quim, "AA", "formados") + 
+                        get_val(bach_quim, "AA", "formados") + 
+                        get_val(bach_ind, "AA", "formados"))
+        pct_total_aa = (total_form_aa / total_ing_aa * 100) if total_ing_aa > 0 else 0
+        
+        pct_geral = ((total_form_ac + total_form_aa) / total_ingressantes_geral * 100) if total_ingressantes_geral > 0 else 0
+        
+        valores = [f"{pct_lic_ac:.2f}%", f"{pct_bach_ac:.2f}%", f"{pct_ind_ac:.2f}%", f"{pct_total_ac:.2f}%",
+                  f"{pct_lic_aa:.2f}%", f"{pct_bach_aa:.2f}%", f"{pct_ind_aa:.2f}%", f"{pct_total_aa:.2f}%",
+                  f"{pct_geral:.2f}%", "-"]
+        
+        for col, val in enumerate(valores, 2):
+            cell = ws.cell(row=row, column=col, value=val)
+            cell.alignment = center_alignment
+            cell.border = border
+        
+        # === Ajusta largura das colunas ===
+        ws.column_dimensions['A'].width = 28
+        for col in range(2, 12):
+            ws.column_dimensions[get_column_letter(col)].width = 14
     
     return wb
 
 
-# Interface Streamlit
+# ==================== INTERFACE STREAMLIT ====================
+
 def main():
-    st.title("📊 Cálculo de Evasão - Cursos de Química UFF")
+    st.title("Cálculo de Evasão - Cursos de Química UFF")
     st.markdown("---")
     
-    # Inicializa o estado da sessão
+    # Inicializa estado da sessão
     if 'logged_in' not in st.session_state:
         st.session_state.logged_in = False
     if 'sistema' not in st.session_state:
         st.session_state.sistema = SistemaAcademicoUFF()
-    if 'dados_coletados' not in st.session_state:
-        st.session_state.dados_coletados = []
+    if 'dados_processados' not in st.session_state:
+        st.session_state.dados_processados = {}
     
-    # Sidebar com informações
+    # Sidebar
     with st.sidebar:
-        st.header("ℹ️ Informações")
+        st.header("Informações")
         st.markdown("""
-        **Este aplicativo:**
-        1. Faz login no sistema acadêmico da UFF
-        2. Consulta relatórios de listagem de alunos
-        3. Processa os dados conforme regras definidas
-        4. Gera planilha de cálculo de evasão
-        
         **Regras de Classificação:**
-        - Código com 'A' → Ampla Concorrência
-        - Código com 'L' → Ações Afirmativas
+        - Código com 'A' = Ampla Concorrência
+        - Código com 'L' = Ações Afirmativas
+        
+        **Cursos:**
+        - Licenciatura Química (12700)
+        - Bacharel Química (312700)
+        - Bacharel Q. Industrial (12709)
         """)
     
-    # Seção de Login
+    # === SEÇÃO DE LOGIN ===
     if not st.session_state.logged_in:
-        st.header("🔐 Login no Sistema Acadêmico")
+        st.header("Login no Sistema Acadêmico")
         
         col1, col2 = st.columns(2)
         with col1:
-            username = st.text_input("IdUFF (CPF, email ou passaporte)", key="username")
+            username = st.text_input("IdUFF (CPF, email ou passaporte)")
         with col2:
-            password = st.text_input("Senha", type="password", key="password")
+            password = st.text_input("Senha", type="password")
         
-        if st.button("🔓 Fazer Login", type="primary"):
+        if st.button("Fazer Login", type="primary"):
             if username and password:
                 with st.spinner("Realizando login..."):
                     success, message = st.session_state.sistema.login(username, password)
-                    
                     if success:
                         st.session_state.logged_in = True
                         st.success(message)
@@ -548,115 +882,33 @@ def main():
                     else:
                         st.error(message)
             else:
-                st.warning("Por favor, preencha usuário e senha.")
+                st.warning("Preencha usuário e senha.")
     
     else:
-        st.success("✅ Logado no sistema acadêmico")
+        st.success("Logado no sistema acadêmico")
         
-        if st.button("🚪 Sair"):
+        if st.button("Sair"):
             st.session_state.logged_in = False
             st.session_state.sistema = SistemaAcademicoUFF()
-            st.session_state.dados_coletados = []
+            st.session_state.dados_processados = {}
             st.rerun()
         
         st.markdown("---")
         
-        # Opções de consulta
-        st.header("📋 Parâmetros da Consulta")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Período inicial
-            ano_inicial = st.selectbox("Ano Inicial", options=list(range(2015, 2027)), index=10)
-            semestre_inicial = st.selectbox("Semestre Inicial", options=[1, 2], index=0)
-            periodo_inicial = f"{ano_inicial}/{semestre_inicial}°"
-        
-        with col2:
-            # Período final
-            ano_final = st.selectbox("Ano Final", options=list(range(2015, 2027)), index=10)
-            semestre_final = st.selectbox("Semestre Final", options=[1, 2], index=0)
-            periodo_final = f"{ano_final}/{semestre_final}°"
-        
-        st.markdown("---")
-        
-        # Seleção de cursos
-        st.subheader("Cursos a Consultar")
-        
-        cursos_selecionados = []
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.checkbox("Química - Licenciatura", value=True):
-                cursos_selecionados.append(("Química", "Licenciatura", "12700"))
-            if st.checkbox("Química - Bacharelado", value=True):
-                cursos_selecionados.append(("Química", "Bacharelado", "312700"))
-        
-        with col2:
-            if st.checkbox("Química Industrial - Bacharelado", value=True):
-                cursos_selecionados.append(("Química Industrial", "Bacharelado Q. Industrial", "12709"))
-        
-        st.markdown("---")
-        
-        # Botão para gerar consultas
-        if st.button("🔍 Consultar Relatórios", type="primary"):
-            if not cursos_selecionados:
-                st.warning("Selecione pelo menos um curso.")
-            else:
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                todos_dados = []
-                total_consultas = len(cursos_selecionados) * ((ano_final - ano_inicial) * 2 + semestre_final - semestre_inicial + 1)
-                consulta_atual = 0
-                
-                # Itera sobre períodos e cursos
-                for ano in range(ano_inicial, ano_final + 1):
-                    for semestre in [1, 2]:
-                        if ano == ano_inicial and semestre < semestre_inicial:
-                            continue
-                        if ano == ano_final and semestre > semestre_final:
-                            continue
-                        
-                        periodo = f"{ano}/{semestre}°"
-                        forma_ingresso = "SISU 1ª Edição" if semestre == 1 else "SISU 2ª Edição"
-                        
-                        for curso, desdobramento, codigo in cursos_selecionados:
-                            consulta_atual += 1
-                            progress = consulta_atual / total_consultas
-                            progress_bar.progress(progress)
-                            status_text.text(f"Consultando: {curso} - {desdobramento} ({periodo})")
-                            
-                            # Aqui seria a chamada real ao sistema
-                            # Por enquanto, simula um delay
-                            time.sleep(0.5)
-                            
-                            # Adiciona dados simulados para demonstração
-                            # Em produção, isso viria do relatório real
-                            dados = {
-                                'periodo': periodo,
-                                'curso': curso,
-                                'desdobramento': desdobramento,
-                                'forma_ingresso': forma_ingresso
-                            }
-                            todos_dados.append(dados)
-                
-                st.session_state.dados_coletados = todos_dados
-                progress_bar.progress(1.0)
-                status_text.text("Consultas concluídas!")
-                st.success(f"✅ {len(todos_dados)} consultas realizadas com sucesso!")
-        
-        st.markdown("---")
-        
-        # Seção de upload manual de dados
-        st.header("📤 Upload Manual de Relatórios")
+        # === UPLOAD DE RELATÓRIOS ===
+        st.header("Upload dos Relatórios Excel")
         st.markdown("""
-        Se preferir, você pode fazer upload dos relatórios XLS exportados manualmente do sistema.
+        Faça upload dos relatórios exportados do sistema. 
+        **Nomeie os arquivos no formato:** `CURSO_PERIODO.xlsx`
+        
+        Exemplos:
+        - `Licenciatura_2025.1.xlsx`
+        - `Bacharel_2024.2.xlsx`
+        - `Industrial_2023.1.xlsx`
         """)
         
         uploaded_files = st.file_uploader(
-            "Faça upload dos arquivos Excel (.xlsx)",
+            "Selecione os arquivos Excel",
             type=['xlsx', 'xls'],
             accept_multiple_files=True
         )
@@ -664,121 +916,142 @@ def main():
         if uploaded_files:
             st.info(f"{len(uploaded_files)} arquivo(s) carregado(s)")
             
-            dados_processados = []
+            # Organiza dados por período e curso
+            dados_por_periodo = defaultdict(lambda: defaultdict(dict))
             
             for uploaded_file in uploaded_files:
                 try:
-                    df = pd.read_excel(uploaded_file, skiprows=3)  # Pula cabeçalho do relatório
-                    df = processar_dados_relatorio(df)
-                    dados_processados.append({
-                        'arquivo': uploaded_file.name,
-                        'dados': df
-                    })
-                    st.success(f"✅ {uploaded_file.name}: {len(df)} registros processados")
+                    # Tenta extrair período e curso do nome do arquivo
+                    nome_arquivo = uploaded_file.name.replace(".xlsx", "").replace(".xls", "")
+                    
+                    # Detecta o curso pelo nome
+                    curso_nome = "Bacharel Química"  # Default
+                    if "licenciatura" in nome_arquivo.lower() or "lic" in nome_arquivo.lower():
+                        curso_nome = "Licenciatura Química"
+                    elif "industrial" in nome_arquivo.lower() or "ind" in nome_arquivo.lower():
+                        curso_nome = "Bacharel Q Industrial"
+                    elif "bacharel" in nome_arquivo.lower() or "bach" in nome_arquivo.lower():
+                        curso_nome = "Bacharel Química"
+                    
+                    # Detecta período (formato: 2025.1 ou 2025/1)
+                    periodo_match = re.search(r'(\d{4})[._/](\d)', nome_arquivo)
+                    if periodo_match:
+                        periodo = f"{periodo_match.group(1)}.{periodo_match.group(2)}"
+                    else:
+                        periodo = "2025.1"  # Default
+                    
+                    # Lê o arquivo Excel
+                    df = pd.read_excel(uploaded_file, skiprows=3)
+                    
+                    # Remove linhas vazias e linhas de resumo
+                    df = df.dropna(how='all')
+                    df = df[~df.iloc[:, 0].astype(str).str.contains('Alunos de', na=False)]
+                    
+                    # Processa os dados
+                    resultados = processar_relatorio(df, curso_nome)
+                    
+                    # Armazena nos dados organizados
+                    dados_por_periodo[periodo][curso_nome] = resultados
+                    
+                    st.success(f"{uploaded_file.name}: {len(df)} registros - Período: {periodo} - Curso: {curso_nome}")
+                    
                 except Exception as e:
-                    st.error(f"❌ Erro ao processar {uploaded_file.name}: {str(e)}")
+                    st.error(f"Erro ao processar {uploaded_file.name}: {str(e)}")
             
-            if dados_processados:
-                # Exibe prévia dos dados
-                st.subheader("📊 Prévia dos Dados Processados")
+            # Salva no estado da sessão
+            st.session_state.dados_processados = dict(dados_por_periodo)
+            
+            # === PRÉVIA DOS DADOS ===
+            if st.session_state.dados_processados:
+                st.markdown("---")
+                st.header("Prévia dos Dados Processados")
                 
-                for item in dados_processados:
-                    with st.expander(f"📁 {item['arquivo']}"):
-                        st.dataframe(item['dados'].head(10))
-                        
-                        # Estatísticas rápidas
-                        df = item['dados']
-                        if 'tipo_modalidade' in df.columns:
-                            st.write("**Distribuição por Modalidade:**")
-                            st.write(df['tipo_modalidade'].value_counts())
-                        
-                        if 'situacao_normalizada' in df.columns:
-                            st.write("**Distribuição por Situação:**")
-                            st.write(df['situacao_normalizada'].value_counts())
+                for periodo, cursos in st.session_state.dados_processados.items():
+                    with st.expander(f"Período: {periodo}"):
+                        for curso, dados in cursos.items():
+                            st.subheader(curso)
+                            col1, col2 = st.columns(2)
+                            
+                            with col1:
+                                st.write("**Ampla Concorrência (AC):**")
+                                if "AC" in dados:
+                                    st.write(f"- Total ingressantes: {dados['AC'].get('total_ingressantes', 0)}")
+                                    st.write(f"- Inscritos: {dados['AC'].get('inscritos', 0)}")
+                                    st.write(f"- Trancados: {dados['AC'].get('trancados', 0)}")
+                                    st.write(f"- Formados: {dados['AC'].get('formados', 0)}")
+                                    st.write(f"- Cancelamentos: {sum(dados['AC'].get('cancelamentos', {}).values())}")
+                            
+                            with col2:
+                                st.write("**Ações Afirmativas (AA):**")
+                                if "AA" in dados:
+                                    st.write(f"- Total ingressantes: {dados['AA'].get('total_ingressantes', 0)}")
+                                    st.write(f"- Inscritos: {dados['AA'].get('inscritos', 0)}")
+                                    st.write(f"- Trancados: {dados['AA'].get('trancados', 0)}")
+                                    st.write(f"- Formados: {dados['AA'].get('formados', 0)}")
+                                    st.write(f"- Cancelamentos: {sum(dados['AA'].get('cancelamentos', {}).values())}")
                 
-                # Botão para gerar planilha de evasão
-                if st.button("📊 Gerar Planilha de Evasão", type="primary"):
+                # === BOTÃO PARA GERAR PLANILHA ===
+                st.markdown("---")
+                if st.button("GERAR PLANILHA DE EVASÃO", type="primary", use_container_width=True):
                     with st.spinner("Gerando planilha..."):
-                        # Combina todos os dados
-                        df_combinado = pd.concat([item['dados'] for item in dados_processados], ignore_index=True)
-                        
-                        # Gera planilha
-                        wb = criar_planilha_demo(df_combinado)
-                        
-                        # Salva em buffer
-                        buffer = io.BytesIO()
-                        wb.save(buffer)
-                        buffer.seek(0)
-                        
-                        # Download
-                        st.download_button(
-                            label="⬇️ Baixar Planilha de Evasão",
-                            data=buffer,
-                            file_name=f"evasao_quimica_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                        
-                        st.success("✅ Planilha gerada com sucesso!")
+                        try:
+                            wb = gerar_planilha_evasao(st.session_state.dados_processados)
+                            
+                            buffer = io.BytesIO()
+                            wb.save(buffer)
+                            buffer.seek(0)
+                            
+                            st.success("Planilha gerada com sucesso!")
+                            
+                            st.download_button(
+                                label="BAIXAR PLANILHA DE EVASÃO",
+                                data=buffer,
+                                file_name=f"Evasao_Quimica_IQ_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True
+                            )
+                        except Exception as e:
+                            st.error(f"Erro ao gerar planilha: {str(e)}")
         
+        # === DEMONSTRAÇÃO ===
         st.markdown("---")
+        st.header("Demonstração com Dados de Exemplo")
         
-        # Seção de demonstração
-        st.header("🎯 Demonstração com Dados de Exemplo")
-        
-        if st.button("📝 Gerar Planilha de Exemplo"):
-            # Cria dados de exemplo baseados na imagem fornecida
+        if st.button("Gerar Planilha de Exemplo (baseada na imagem fornecida)"):
+            # Dados de exemplo baseados na imagem
             dados_exemplo = {
-                'Matrícula': ['225.028.068', '225.028.060', '225.028.082', '225.028.096', '225.028.069',
-                              '025.028.054', '225.028.092', '225.028.073', '225.028.077', '225.028.064',
-                              '225.028.061', '025.028.057', '225.028.081', '225.028.063', '225.028.076'],
-                'Nome': ['Adalia Lucio Soares', 'Ana Luiza Fontana Alves', 'Daniel Rodrigues Pereira da Silva',
-                         'Daniella Labarba Menezes Silva', 'Inacio Pinto Lopes Barbosa Soares',
-                         'Isabel Rocha de Paulo Rarrios', 'Isabelle Santana Marre Drumond',
-                         'Isadora Scalercio de Macedo', 'Julia Clara Freitas Ramos Correia',
-                         'Laysa Gomes Borges Pimentel Luz', 'Luana Aparecida de Oliveira Santos',
-                         'Millena Ortiz Xavier', 'Sara Couto Oliveira', 'Sofia Inacio da Conceicao',
-                         'Vanessa Rodrigues Martins'],
-                'Situação': ['Pendente', 'Pendente', 'Pendente', 'Pendente', 'Pendente',
-                             'Cancelamento por Solicitação Oficial', 'Pendente', 'Pendente', 'Pendente',
-                             'Pendente', 'Pendente', 'Pendente', 'Pendente', 'Pendente',
-                             'Cancelamento Ingressante por Insuficiência de Aproveitamento'],
-                'Turno': ['Integral'] * 15,
-                'Desvinculado em': ['', '', '', '', '', '2025 / 2°', '', '', '', '', '', '', '', '', '2025 / 2°'],
-                'Modalidade de Ingresso': ['LI_PPI', 'AC', 'AC', 'AC', 'AC', 'L2', 'AC', 'LI_EP', 'AC', 'AC',
-                                           'LI_PPI', 'L2', 'AC', 'LI_EP', 'LB_EP']
+                "2025.1": {
+                    "Licenciatura Química": {
+                        "AC": {"total_ingressantes": 10, "cancelamentos": {"Solicitação Oficial": 1}, "inscritos": 6, "trancados": 0, "formados": 0},
+                        "AA": {"total_ingressantes": 16, "cancelamentos": {"Solicitação Oficial": 1, "Ingressante - Insuf. Aproveit.": 3}, "inscritos": 11, "trancados": 1, "formados": 0}
+                    },
+                    "Bacharel Química": {
+                        "AC": {"total_ingressantes": 5, "cancelamentos": {}, "inscritos": 5, "trancados": 0, "formados": 0},
+                        "AA": {"total_ingressantes": 9, "cancelamentos": {}, "inscritos": 7, "trancados": 0, "formados": 0}
+                    },
+                    "Bacharel Q Industrial": {
+                        "AC": {"total_ingressantes": 9, "cancelamentos": {}, "inscritos": 8, "trancados": 1, "formados": 0},
+                        "AA": {"total_ingressantes": 11, "cancelamentos": {"Ingressante - Insuf. Aproveit.": 2}, "inscritos": 6, "trancados": 2, "formados": 0}
+                    }
+                }
             }
             
-            df_exemplo = pd.DataFrame(dados_exemplo)
-            df_processado = processar_dados_relatorio(df_exemplo)
-            
-            # Exibe os dados processados
-            st.subheader("Dados Processados")
-            st.dataframe(df_processado)
-            
-            # Estatísticas
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.write("**Por Modalidade:**")
-                st.write(df_processado['tipo_modalidade'].value_counts())
-            
-            with col2:
-                st.write("**Por Situação:**")
-                st.write(df_processado['situacao_normalizada'].value_counts())
-            
-            # Gera planilha
-            wb = criar_planilha_demo(df_processado)
-            
-            buffer = io.BytesIO()
-            wb.save(buffer)
-            buffer.seek(0)
-            
-            st.download_button(
-                label="⬇️ Baixar Planilha de Exemplo",
-                data=buffer,
-                file_name="evasao_exemplo.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            with st.spinner("Gerando planilha de exemplo..."):
+                wb = gerar_planilha_evasao(dados_exemplo)
+                
+                buffer = io.BytesIO()
+                wb.save(buffer)
+                buffer.seek(0)
+                
+                st.success("Planilha de exemplo gerada!")
+                
+                st.download_button(
+                    label="BAIXAR PLANILHA DE EXEMPLO",
+                    data=buffer,
+                    file_name="Evasao_Quimica_EXEMPLO.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
 
 
 if __name__ == "__main__":
