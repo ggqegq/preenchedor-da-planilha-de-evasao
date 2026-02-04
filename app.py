@@ -42,7 +42,17 @@ def main():
         st.session_state.usuario = None
     
     # Menu lateral
-    st.sidebar.title("📊 Navegação")
+aba_selecionada = st.sidebar.radio(
+    "Selecione a etapa:",
+    ["🔐 Login", "📋 Consultar Relatórios", "📤 Upload Manual", 
+     "📈 Gerar Planilha", "🔍 Debug Login", "⚙️ Configurações"]
+)
+def exibir_tela_debug():
+    """Exibe a tela de debug do login"""
+    st.header("🔍 Debug do Sistema de Login")
+    
+    from modulo_login import debug_pagina_login
+    debug_pagina_login()
     
     # Estado da aplicação
     aba_selecionada = st.sidebar.radio(
@@ -50,21 +60,23 @@ def main():
         ["🔐 Login", "📋 Consultar Relatórios", "📤 Upload Manual", "📈 Gerar Planilha", "⚙️ Configurações"]
     )
     
-    # Mapeamento das abas
-    if aba_selecionada == "🔐 Login":
+      # Mapeamento das abas
+if aba_selecionada == "🔐 Login":
+    exibir_tela_login()
+elif aba_selecionada == "📋 Consultar Relatórios":
+    if st.session_state.logado:
+        exibir_tela_consulta()
+    else:
+        st.warning("⚠️ Faça login primeiro para acessar esta funcionalidade.")
         exibir_tela_login()
-    elif aba_selecionada == "📋 Consultar Relatórios":
-        if st.session_state.logado:
-            exibir_tela_consulta()
-        else:
-            st.warning("⚠️ Faça login primeiro para acessar esta funcionalidade.")
-            exibir_tela_login()
-    elif aba_selecionada == "📤 Upload Manual":
-        exibir_tela_upload()
-    elif aba_selecionada == "📈 Gerar Planilha":
-        exibir_tela_gerar_planilha()
-    else:  # Configurações
-        exibir_tela_configuracoes()
+elif aba_selecionada == "📤 Upload Manual":
+    exibir_tela_upload()
+elif aba_selecionada == "📈 Gerar Planilha":
+    exibir_tela_gerar_planilha()
+elif aba_selecionada == "🔍 Debug Login":  # NOVO
+    exibir_tela_debug()
+else:  # Configurações
+    exibir_tela_configuracoes()
 
 def exibir_tela_login():
     """Exibe a tela de login"""
