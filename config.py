@@ -1,75 +1,72 @@
-# config.py - Configurações do sistema
-import os
-from dataclasses import dataclass
+"""
+config.py - Configurações do projeto de automação de relatórios UFF
+"""
 
-@dataclass
-class SistemaConfig:
-    """Configurações do sistema acadêmico"""
-    BASE_URL = "https://app.uff.br"
-    LOGIN_URL = f"{BASE_URL}/graduacao/administracaoacademica"
-    RELATORIOS_URL = f"{BASE_URL}/graduacao/administracaoacademica/relatorios/listagens_alunos"
-    
-    # Cursos específicos para análise
-    CURSOS_QUIMICA = {
-        'licenciatura': {
-            'nome': 'Química (Licenciatura)',
-            'codigo': '12700',
-            'desdobramento': 'Química (Licenciatura) (12700)'
-        },
-        'bacharelado': {
-            'nome': 'Química (Bacharelado)',
-            'codigo': '312700',
-            'desdobramento': 'Química (Bacharelado) (312700)'
-        },
-        'industrial': {
-            'nome': 'Química Industrial',
-            'codigo': '12709',
-            'desdobramento': 'Química Industrial (12709)'
+# URLs do sistema
+BASE_URL = "https://app.uff.br"
+APLICACAO_URL = "https://app.uff.br/graduacao/administracaoacademica"
+LOGIN_URL = "https://app.uff.br/auth/realms/master/protocol/openid-connect/auth"
+TOKEN_URL = "https://app.uff.br/auth/realms/master/protocol/openid-connect/token"
+
+# Caminhos relativos
+RELATORIOS_URL = f"{APLICACAO_URL}/relatorios"
+LISTAGEM_ALUNOS_URL = f"{APLICACAO_URL}/relatorios/listagens_alunos"
+
+# Parâmetros padrão
+PARAMETROS_PADRAO = {
+    'localidade': 'Niterói',
+    'tipo_saida': 'xlsx',
+    'gerar_button': 'Gerar relatório em xlsx'
+}
+
+# Mapeamento de cursos
+CURSOS = {
+    'quimica': {
+        'nome': 'Química',
+        'desdobramentos': {
+            'licenciatura': {
+                'nome': 'Química (Licenciatura) (12700)',
+                'codigo': '12700'
+            },
+            'bacharelado': {
+                'nome': 'Química (Bacharelado) (312700)',
+                'codigo': '312700'
+            }
+        }
+    },
+    'quimica_industrial': {
+        'nome': 'Química Industrial',
+        'desdobramentos': {
+            'default': {
+                'nome': 'Química Industrial (12709)',
+                'codigo': '12709'
+            }
         }
     }
-    
-    # Mapeamento de formas de ingresso
-    FORMAS_INGRESSO = {
-        'SISU_1': 'SISU 1ª Edição',
-        'SISU_2': 'SISU 2ª Edição'
-    }
-    
-    # Localidades
-    LOCALIDADES = {
-        '1': 'Niterói',
-        '2': 'Campos dos Goytacazes',
-        '3': 'Volta Redonda',
-        '4': 'Santo Antônio de Pádua',
-        '5': 'Nova Iguaçu',
-        '6': 'Angra dos Reis',
-        '7': 'Itaperuna',
-        '8': 'Miracema',
-        '9': 'Macaé',
-        '10': 'Bom Jesus do Itabapoana',
-        '11': 'Cabo Frio',
-        '12': 'São João de Meriti',
-        '13': 'Arraial do Cabo',
-        '14': 'Rio das Ostras',
-        '15': 'Quissamã',
-        '16': 'Nova Friburgo',
-        '20': 'Petrópolis',
-        '47': 'Curso Sequencial',
-        '48': 'Curso à Distância',
-        '49': 'Pinheiral',
-        '50': 'Curso Semipresencial'
-    }
+}
 
-# Configurações do Streamlit
-class StreamlitConfig:
-    PAGE_TITLE = "Sistema de Análise de Evasão - UFF"
-    PAGE_ICON = "🎓"
-    LAYOUT = "wide"
-    
-    @staticmethod
-    def setup():
-        import streamlit as st
-        st.set_page_config(
-            page_title=StreamlitConfig.PAGE_TITLE,
-            page_icon=StreamlitConfig.PAGE_ICON,
-            layout=StreamlitConfig.LAYOUT
-        )
+# Formas de ingresso
+FORMAS_INGRESSO = {
+    '1': 'SISU 1ª Edição',
+    '2': 'SISU 2ª Edição',
+    '-': '-'
+}
+
+# Headers para requests
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+}
+
+# Configurações de timeout
+TIMEOUT_REQUESTS = 30
+TIMEOUT_PROCESSAMENTO = 3600  # 1 hora
+INTERVALO_VERIFICACAO = 30  # segundos
+
+# Caminhos de arquivos
+PASTA_RELATORIOS = 'relatorios'
+LOG_FILE = 'relatorios_uff.log'
