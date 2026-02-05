@@ -668,6 +668,7 @@ else:
                     st.markdown("**Cursos:**")
                     for curso in cursos_selecionados_objetos:
                         st.markdown(f"- {curso['nome']}")
+                        
     # ADICIONAR ESTAS FUNÇÕES NOVAS NO main.py, ANTES DA SEÇÃO "Etapa 3"
 
 def buscar_cursos_por_localidade(session, localidade_id):
@@ -1071,7 +1072,7 @@ def preprocessar_dados_relatorio(df):
         'colunas_mapeadas': colunas_mapeadas
     }
     
-    # NO main.py, SUBSTITUIR A SEÇÃO "Etapa 3" COMPLETA POR:
+    # ATUALIZE A PARTE DA ETAPA 3 NO main.py COM ESTE CÓDIGO:
 
     # Etapa 3 - Consulta de Relatórios
     elif etapa_atual == 3:
@@ -1151,7 +1152,7 @@ def preprocessar_dados_relatorio(df):
                         st.rerun()
             
             # Se a consulta está em andamento
-            if st.session_state.get('consulta_em_andamento', False):
+            elif st.session_state.get('consulta_em_andamento', False):
                 st.markdown("---")
                 st.markdown("### 🔄 Consulta em Andamento")
                 
@@ -1171,16 +1172,23 @@ def preprocessar_dados_relatorio(df):
                     
                     # Estatísticas
                     total_cursos = len(st.session_state.selected_cursos)
-                    sucesso = sum(1 for curso in st.session_state.selected_cursos 
-                                 if curso['nome'] in st.session_state.relatorios_baixados and 
-                                 st.session_state.relatorios_baixados[curso['nome']]['status'] == 'sucesso')
+                    sucesso = 0
+                    for curso in st.session_state.selected_cursos:
+                        curso_nome = curso['nome']
+                        if (curso_nome in st.session_state.relatorios_baixados and 
+                            st.session_state.relatorios_baixados[curso_nome]['status'] == 'sucesso'):
+                            sucesso += 1
+                    
                     erros = total_cursos - sucesso
                     
                     col_s1, col_s2, col_s3 = st.columns(3)
                     with col_s1:
                         st.metric("Total de Cursos", total_cursos)
                     with col_s2:
-                        st.metric("Sucesso", sucesso, delta=f"{sucesso/total_cursos*100:.1f}%" if total_cursos > 0 else "0%")
+                        if total_cursos > 0:
+                            st.metric("Sucesso", sucesso, delta=f"{sucesso/total_cursos*100:.1f}%")
+                        else:
+                            st.metric("Sucesso", sucesso)
                     with col_s3:
                         st.metric("Erros", erros, delta_color="inverse")
                     
@@ -1190,7 +1198,12 @@ def preprocessar_dados_relatorio(df):
                     for curso in st.session_state.selected_cursos:
                         curso_nome = curso['nome']
                         
-                        with st.expander(f"{'✅' if curso_nome in st.session_state.relatorios_baixados and st.session_state.relatorios_baixados[curso_nome]['status'] == 'sucesso' else '❌'} {curso_nome}", expanded=False):
+                        status_icon = "❌"
+                        if curso_nome in st.session_state.relatorios_baixados:
+                            if st.session_state.relatorios_baixados[curso_nome]['status'] == 'sucesso':
+                                status_icon = "✅"
+                        
+                        with st.expander(f"{status_icon} {curso_nome}", expanded=False):
                             if curso_nome in st.session_state.relatorios_baixados:
                                 dados = st.session_state.relatorios_baixados[curso_nome]
                                 
@@ -1270,11 +1283,10 @@ def preprocessar_dados_relatorio(df):
                 
                 # Mostrar resumo dos dados já coletados
                 if st.session_state.relatorios_baixados:
-                    total_registros = sum(
-                        len(data['df']) 
-                        for curso, data in st.session_state.relatorios_baixados.items() 
-                        if 'df' in data and data['status'] == 'sucesso'
-                    )
+                    total_registros = 0
+                    for curso, data in st.session_state.relatorios_baixados.items():
+                        if 'df' in data and data['status'] == 'sucesso':
+                            total_registros += len(data['df'])
                     
                     st.info(f"✅ {len(st.session_state.relatorios_baixados)} curso(s) com dados coletados")
                     st.info(f"📊 Total de registros: {total_registros:,}")
@@ -1287,8 +1299,9 @@ def preprocessar_dados_relatorio(df):
                         st.session_state.consulta_concluida = False
                         st.session_state.relatorios_baixados = {}
                         st.session_state.dados_processados = {}
-                        st.rerun()    
-    # Etapa 4 - Processamento dos Dados
+                        st.rerun()
+                        
+# Etapa 4 - Processamento dos Dados
     elif etapa_atual >= 4:
         st.markdown("## ⚙️ Etapa 4 - Processamento dos Dados")
         
