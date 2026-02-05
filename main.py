@@ -1,4 +1,4 @@
-# main.py - VERSÃO CORRIGIDA E COMPLETA
+# main.py - VERSÃO COMPLETA CORRIGIDA
 import streamlit as st
 import os
 import sys
@@ -17,8 +17,6 @@ logger = logging.getLogger(__name__)
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from auth import UFFAuthenticator
-from formulario_handler import FormularioHandler
-from relatorio_automator import RelatorioUFFAutomator
 
 # URLs do sistema
 BASE_URL = "https://app.uff.br"
@@ -311,7 +309,15 @@ else:
                     localidade_value = '1'
                 else:
                     st.error("Localidade Niterói não encontrada")
-                    return
+                    # Em vez de 'return', usamos um valor padrão ou paramos o fluxo
+                    if localidades:
+                        # Usar a primeira localidade disponível
+                        localidade_niteroi = localidades[0]
+                        localidade_value = localidade_niteroi['value']
+                        st.warning(f"Usando alternativa: {localidade_niteroi['text']}")
+                    else:
+                        st.error("Nenhuma localidade disponível")
+                        st.stop()  # Para a execução
                 
                 # Forma de Ingresso - AMBOS SISUS PRÉ-SELECIONADOS
                 formas_ingresso = form_params.get('formas_ingresso', [])
@@ -339,9 +345,15 @@ else:
                         st.success("✅ Ambos SISU 1ª e 2ª Edição selecionados")
                     else:
                         st.warning("⚠️ Nem todas as formas SISU foram encontradas")
+                        # Mostrar opções disponíveis
+                        with st.expander("Formas disponíveis"):
+                            for forma in formas_ingresso:
+                                st.write(f"- {forma['text']} (valor: {forma['value']})")
                 else:
                     st.error("Formas de ingresso SISU não encontradas")
-                    return
+                    with st.expander("Formas disponíveis"):
+                        for forma in formas_ingresso:
+                            st.write(f"- {forma['text']} (valor: {forma['value']})")
             
             with col2:
                 st.subheader("🎯 Seleção de Períodos")
@@ -354,6 +366,10 @@ else:
                 else:
                     # Filtrar apenas períodos válidos (remover "--- Todos ---")
                     periodos_validos = [p for p in periodos if p['text'] != '--- Todos ---']
+                    
+                    # Se não houver períodos válidos, usar todos
+                    if not periodos_validos:
+                        periodos_validos = periodos
                     
                     # Converter para lista de textos
                     periodo_textos = [p['text'] for p in periodos_validos]
@@ -374,41 +390,55 @@ else:
                                     'valor_ordenacao': ano * 10 + semestre
                                 })
                         
-                        # Ordenar do mais antigo para mais recente
-                        periodos_com_info.sort(key=lambda x: x['valor_ordenacao'])
-                        periodo_textos_ordenados = [p['texto'] for p in periodos_com_info]
-                        
-                        # ENCONTRAR 2013/1° COMO PADRÃO INICIAL
-                        idx_2013_1 = -1
-                        for i, periodo in enumerate(periodo_textos_ordenados):
-                            if '2013 / 1' in periodo:
-                                idx_2013_1 = i
-                                break
-                        
-                        # Se não encontrar 2013/1, usar o mais antigo disponível
-                        idx_inicial = idx_2013_1 if idx_2013_1 != -1 else 0
-                        
-                        # Período Inicial (MAIS ANTIGO - início do intervalo)
-                        periodo_inicial_texto = st.selectbox(
-                            "Período Inicial (início do intervalo)",
-                            options=periodo_textos_ordenados,
-                            index=idx_inicial,
-                            help="Selecione o período mais ANTIGO do intervalo de análise",
-                            key="periodo_inicial"
-                        )
-                        
-                        # Período Final (MAIS RECENTE - fim do intervalo)
-                        periodo_inicial_idx = periodo_textos_ordenados.index(periodo_inicial_texto)
-                        periodos_finais_disponiveis = periodo_textos_ordenados[periodo_inicial_idx:]
-                        idx_final_disponivel = len(periodos_finais_disponiveis) - 1
-                        
-                        periodo_final_texto = st.selectbox(
-                            "Período Final (fim do intervalo)",
-                            options=periodos_finais_disponiveis,
-                            index=idx_final_disponivel,
-                            help="Selecione o período mais RECENTE do intervalo de análise",
-                            key="periodo_final"
-                        )
+                        if periodos_com_info:
+                            # Ordenar do mais antigo para mais recente
+                            periodos_com_info.sort(key=lambda x: x['valor_ordenacao'])
+                            periodo_textos_ordenados = [p['texto'] for p in periodos_com_info]
+                            
+                            # ENCONTRAR 2013/1° COMO PADRÃO INICIAL
+                            idx_2013_1 = -1
+                            for i, periodo in enumerate(periodo_textos_ordenados):
+                                if '2013 / 1' in periodo:
+                                    idx_2013_1 = i
+                                    break
+                            
+                            # Se não encontrar 2013/1, usar o mais antigo disponível
+                            idx_inicial = idx_2013_1 if idx_2013_1 != -1 else 0
+                            
+                            # Período Inicial (MAIS ANTIGO - início do intervalo)
+                            periodo_inicial_texto = st.selectbox(
+                                "Período Inicial (início do intervalo)",
+                                options=periodo_textos_ordenados,
+                                index=idx_inicial,
+                                help="Selecione o período mais ANTIGO do intervalo de análise",
+                                key="periodo_inicial"
+                            )
+                            
+                            # Período Final (MAIS RECENTE - fim do intervalo)
+                            periodo_inicial_idx = periodo_textos_ordenados.index(periodo_inicial_texto)
+                            periodos_finais_disponiveis = periodo_textos_ordenados[periodo_inicial_idx:]
+                            idx_final_disponivel = len(periodos_finais_disponiveis) - 1
+                            
+                            periodo_final_texto = st.selectbox(
+                                "Período Final (fim do intervalo)",
+                                options=periodos_finais_disponiveis,
+                                index=idx_final_disponivel,
+                                help="Selecione o período mais RECENTE do intervalo de análise",
+                                key="periodo_final"
+                            )
+                        else:
+                            # Se não conseguir parsear períodos, mostrar lista simples
+                            periodo_inicial_texto = st.selectbox(
+                                "Período Inicial",
+                                options=periodo_textos,
+                                key="periodo_inicial_simple"
+                            )
+                            periodo_final_texto = st.selectbox(
+                                "Período Final",
+                                options=periodo_textos,
+                                index=len(periodo_textos)-1,
+                                key="periodo_final_simple"
+                            )
             
             # Seleção de Cursos
             st.markdown("---")
@@ -456,35 +486,74 @@ else:
             
             if st.button("✅ Confirmar Seleção e Prosseguir", type="primary", use_container_width=True):
                 # Validações
-                if not formas_valores or len(formas_valores) != 2:
-                    st.error("As duas formas de ingresso SISU devem estar selecionadas")
-                elif not cursos_selecionados_objetos:
-                    st.error("Selecione pelo menos um curso")
-                elif not periodo_inicial_texto or not periodo_final_texto:
-                    st.error("Selecione os períodos")
+                validation_errors = []
+                
+                if 'formas_valores' not in locals() or not formas_valores or len(formas_valores) < 2:
+                    validation_errors.append("As duas formas de ingresso SISU devem estar selecionadas")
+                
+                if not cursos_selecionados_objetos:
+                    validation_errors.append("Selecione pelo menos um curso")
+                
+                if not periodo_inicial_texto or not periodo_final_texto:
+                    validation_errors.append("Selecione os períodos")
                 else:
                     # Validar intervalo
                     resultado = comparar_periodos(periodo_inicial_texto, periodo_final_texto)
                     if resultado == 1:  # Inicial > Final (inválido)
-                        st.error("Período inicial não pode ser posterior ao final")
-                    else:
-                        # Armazenar seleções
-                        st.session_state.selected_cursos = cursos_selecionados_objetos
-                        st.session_state.selected_periodos = {
-                            'inicial': periodo_inicial_texto,
-                            'final': periodo_final_texto,
-                            'valor_inicial': periodo_valores.get(periodo_inicial_texto, ''),
-                            'valor_final': periodo_valores.get(periodo_final_texto, '')
-                        }
-                        st.session_state.formas_ingresso_selecionadas = formas_valores
-                        st.session_state.localidade_selecionada = {
-                            'text': localidade_niteroi['text'],
-                            'value': localidade_value
-                        }
+                        validation_errors.append("Período inicial não pode ser posterior ao final")
+                
+                if validation_errors:
+                    for error in validation_errors:
+                        st.error(error)
+                else:
+                    # Armazenar seleções
+                    st.session_state.selected_cursos = cursos_selecionados_objetos
+                    st.session_state.selected_periodos = {
+                        'inicial': periodo_inicial_texto,
+                        'final': periodo_final_texto,
+                        'valor_inicial': periodo_valores.get(periodo_inicial_texto, ''),
+                        'valor_final': periodo_valores.get(periodo_final_texto, '')
+                    }
+                    st.session_state.formas_ingresso_selecionadas = formas_valores
+                    st.session_state.localidade_selecionada = {
+                        'text': localidade_niteroi['text'] if localidade_niteroi else 'Niterói',
+                        'value': localidade_value
+                    }
+                    
+                    st.success("🎉 Configuração salva com sucesso!")
+                    
+                    # Mostrar resumo
+                    with st.expander("📋 Resumo da Configuração", expanded=True):
+                        col_a, col_b = st.columns(2)
+                        with col_a:
+                            st.write(f"**Localidade:** {st.session_state.localidade_selecionada['text']}")
+                            if 'formas_selecionadas' in locals():
+                                st.write(f"**Formas de Ingresso:** {', '.join(formas_selecionadas)}")
+                        with col_b:
+                            st.write(f"**Período:** {periodo_inicial_texto} a {periodo_final_texto}")
                         
-                        st.success("🎉 Configuração salva com sucesso!")
-                        time.sleep(1)
-                        st.rerun()
+                        st.write("**Cursos selecionados:**")
+                        for curso in cursos_selecionados_objetos:
+                            st.write(f"- {curso['nome']} ({curso['tipo']})")
+                    
+                    time.sleep(2)
+                    st.rerun()
+            
+            # Mostrar pré-visualização
+            if cursos_selecionados_objetos:
+                with st.expander("📋 Pré-visualização da Configuração", expanded=False):
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.markdown(f"**Localidade:** {localidade_niteroi['text'] if localidade_niteroi else 'N/A'}")
+                        if 'formas_selecionadas' in locals():
+                            st.markdown(f"**Formas de Ingresso:** {' e '.join(formas_selecionadas)}")
+                    with col_b:
+                        st.markdown(f"**Período Inicial:** {periodo_inicial_texto}")
+                        st.markdown(f"**Período Final:** {periodo_final_texto}")
+                    
+                    st.markdown("**Cursos:**")
+                    for curso in cursos_selecionados_objetos:
+                        st.markdown(f"- {curso['nome']}")
     
     # Etapa 3 - Consulta de Relatórios
     elif etapa_atual == 3:
@@ -561,11 +630,10 @@ else:
             # Resumo dos dados coletados
             st.markdown("### 📊 Dados Coletados")
             
-            total_registros = sum(
-                len(data['df']) 
-                for curso, data in st.session_state.relatorios_baixados.items() 
-                if 'df' in data and data['status'] == 'sucesso'
-            )
+            total_registros = 0
+            for curso, data in st.session_state.relatorios_baixados.items():
+                if 'df' in data and data['status'] == 'sucesso':
+                    total_registros += len(data['df'])
             
             col_r1, col_r2, col_r3 = st.columns(3)
             with col_r1:
