@@ -1,11 +1,11 @@
 """
-auth.py - Módulo de autenticação no sistema UFF
+auth.py - Módulo de autenticação no sistema UFF (versão funcional)
 """
 import requests
 from bs4 import BeautifulSoup
 import re
-from urllib.parse import urlencode, parse_qs, urlparse
 import logging
+from urllib.parse import urlparse, urljoin
 from config import *
 
 logger = logging.getLogger(__name__)
@@ -21,8 +21,38 @@ class UFFAuthenticator:
         self.is_authenticated = False
         self.auth_data = {}
     
+    def extract_login_parameters(self, html_content):
+        """Extrai parâmetros do formulário de login (função que estava funcionando)"""
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Primeiro, tentar encontrar o formulário pelo ID
+        login_form = soup.find('form', {'id': 'kc-form-login'})
+        
+        if not login_form:
+            # Tentar outros padrões comuns
+            login_form = soup.find('form', action=lambda x: x and '/auth/' in x)
+            if not login_form:
+                login_form = soup.find('form', method='post')
+        
+        if not login_form:
+            return None
+        
+        action_url = login_form.get('action', '')
+        hidden_inputs = {}
+        
+        for input_tag in login_form.find_all('input', type='hidden'):
+            name = input_tag.get('name', '')
+            value = input_tag.get('value', '')
+            if name:
+                hidden_inputs[name] = value
+        
+        return {
+            'action_url': action_url,
+            'hidden_fields': hidden_inputs
+        }
+    
     def login(self, username=None, password=None):
-        """Realiza login no sistema UFF"""
+        """Realiza login no sistema UFF usando a lógica que estava funcionando"""
         if username:
             self.username = username
         if password:
@@ -34,87 +64,96 @@ class UFFAuthenticator:
         try:
             logger.info(f"Tentando login para usuário: {self.username}")
             
-            # Primeiro, acessar a página de login para obter parâmetros OAuth
-            response = self.session.get(APLICACAO_URL, timeout=TIMEOUT_REQUESTS)
-            soup = BeautifulSoup(response.text, 'html.parser')
+            # 1. Acessar a página inicial da aplicação
+            login_page_url = APLICACAO_URL
+            response = self.session.get(login_page_url, timeout=TIMEOUT_REQUESTS)
             
-            # Encontrar link de login
-            login_link = soup.find('a', href=lambda x: x and 'openid-connect' in x)
-            if login_link:
-                login_url = login_link['href']
-                logger.info(f"URL de login encontrada: {login_url}")
-            else:
-                # Tentar padrão comum
-                login_url = LOGIN_URL
-                params = {
-                    'client_id': 'graduacao-administracaoacademica',
-                    'redirect_uri': f'{APLICACAO_URL}/',
-                    'response_type': 'code',
-                    'scope': 'openid',
-                    'state': self._generate_state()
-                }
-                login_url = f"{LOGIN_URL}?{urlencode(params)}"
+            if response.status_code != 200:
+                logger.error(f"Falha ao acessar página: {response.status_code}")
+                return False
             
-            # Acessar página de login OAuth
-            response = self.session.get(login_url, timeout=TIMEOUT_REQUESTS)
-            soup = BeautifulSoup(response.text, 'html.parser')
+            # 2. Extrair parâmetros do formulário de login
+            login_params = self.extract_login_parameters(response.text)
             
-            # Extrair parâmetros do formulário de login
-            form = soup.find('form')
-            if not form:
-                raise Exception("Formulário de login não encontrado")
+            if not login_params:
+                logger.error("Não foi possível encontrar o formulário de login")
+                return False
             
-            # Preparar dados do formulário
-            form_data = {}
-            for input_tag in form.find_all('input'):
-                if input_tag.get('name'):
-                    form_data[input_tag['name']] = input_tag.get('value', '')
+            # 3. Preparar dados do formulário
+            form_data = {
+                'username': self.username,
+                'password': self.password,
+                'rememberMe': 'on'
+            }
             
-            # Adicionar credenciais
-            form_data['username'] = self.username
-            form_data['password'] = self.password
+            # Adicionar campos hidden
+            if login_params['hidden_fields']:
+                form_data.update(login_params['hidden_fields'])
             
-            # Encontrar URL de ação do formulário
-            action_url = form.get('action', '')
-            if not action_url.startswith('http'):
-                # Construir URL completa
-                parsed = urlparse(login_url)
-                action_url = f"{parsed.scheme}://{parsed.netloc}{action_url}"
+            # 4. Construir URL completa da ação
+            login_action = login_params['action_url']
             
-            # Submeter formulário de login
-            response = self.session.post(
-                action_url,
+            # Se for URL relativa, construir URL completa
+            if login_action.startswith('/'):
+                parsed_base = urlparse(BASE_URL)
+                login_action = f"{parsed_base.scheme}://{parsed_base.netloc}{login_action}"
+            
+            # 5. Enviar requisição de login
+            headers = {
+                'User-Agent': HEADERS['User-Agent'],
+                'Referer': login_page_url,
+                'Origin': BASE_URL,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+                'Content-Type': 'application/x-www-form-urlencoded',
+            }
+            
+            logger.info(f"Enviando login para: {login_action}")
+            
+            login_response = self.session.post(
+                login_action,
                 data=form_data,
+                headers=headers,
                 allow_redirects=True,
                 timeout=TIMEOUT_REQUESTS
             )
             
-            # Verificar se login foi bem-sucedido
-            if response.url and APLICACAO_URL in response.url:
-                self.is_authenticated = True
-                logger.info("Login realizado com sucesso!")
-                
-                # Extrair token CSRF
-                self._extract_csrf_token(response.text)
-                
-                # Salvar cookies de sessão
-                self.auth_data['cookies'] = dict(self.session.cookies)
-                self.auth_data['headers'] = dict(self.session.headers)
-                
-                return True
-            else:
-                logger.error("Login falhou. Verifique as credenciais.")
-                return False
+            # 6. Verificar se login foi bem-sucedido
+            if login_response.status_code == 200:
+                # Verificar se estamos na aplicação correta
+                if APLICACAO_URL in login_response.url or 'administracaoacademica' in login_response.url:
+                    self.is_authenticated = True
+                    
+                    # Extrair token CSRF
+                    self._extract_csrf_token(login_response.text)
+                    
+                    # Salvar informações da sessão
+                    self.auth_data['cookies'] = dict(self.session.cookies)
+                    self.auth_data['headers'] = dict(self.session.headers)
+                    
+                    logger.info("✅ Login realizado com sucesso!")
+                    return True
+                else:
+                    # Verificar se há mensagem de erro
+                    soup = BeautifulSoup(login_response.text, 'html.parser')
+                    error_div = soup.find('div', {'id': 'kc-error-message'}) or \
+                               soup.find('span', class_='kc-feedback-text') or \
+                               soup.find('div', class_='alert-error')
+                    
+                    if error_div:
+                        error_msg = error_div.get_text(strip=True)
+                        logger.error(f"Erro no login: {error_msg}")
+                    else:
+                        logger.error(f"Redirecionado para URL incorreta: {login_response.url}")
+                    
+                    return False
+            
+            logger.error(f"Status code inesperado: {login_response.status_code}")
+            return False
                 
         except Exception as e:
-            logger.error(f"Erro durante o login: {str(e)}")
+            logger.error(f"Erro durante o login: {str(e)}", exc_info=True)
             return False
-    
-    def _generate_state(self):
-        """Gera um state para OAuth"""
-        import random
-        import string
-        return ''.join(random.choices(string.ascii_letters + string.digits, k=16))
     
     def _extract_csrf_token(self, html_content):
         """Extrai token CSRF do HTML"""
@@ -132,6 +171,14 @@ class UFFAuthenticator:
         if input_token and input_token.get('value'):
             self.auth_data['authenticity_token'] = input_token['value']
             logger.info(f"Authenticity Token extraído: {input_token['value'][:20]}...")
+        
+        # Extrair outros tokens úteis
+        for input_tag in soup.find_all('input', type='hidden'):
+            name = input_tag.get('name', '')
+            if name and 'token' in name.lower():
+                value = input_tag.get('value', '')
+                if value:
+                    self.auth_data[name] = value
     
     def logout(self):
         """Realiza logout do sistema"""
@@ -151,11 +198,28 @@ class UFFAuthenticator:
             return False
         
         try:
-            response = self.session.get(APLICACAO_URL, timeout=TIMEOUT_REQUESTS)
-            return response.status_code == 200 and 'Sair' in response.text
-        except:
+            # Tentar acessar uma página que requer autenticação
+            test_url = f"{APLICACAO_URL}/relatorios"
+            response = self.session.get(test_url, timeout=TIMEOUT_REQUESTS, allow_redirects=False)
+            
+            # Se for redirecionado para login, sessão expirou
+            if response.status_code == 302:
+                location = response.headers.get('location', '')
+                if 'auth' in location or 'login' in location:
+                    return False
+            
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"Erro ao verificar sessão: {str(e)}")
             return False
     
     def get_session(self):
         """Retorna a sessão autenticada"""
         return self.session if self.is_authenticated else None
+    
+    def refresh_session(self):
+        """Tenta renovar a sessão se estiver expirada"""
+        if not self.check_session() and self.username and self.password:
+            logger.info("Sessão expirada, tentando renovar...")
+            return self.login(self.username, self.password)
+        return self.is_authenticated
