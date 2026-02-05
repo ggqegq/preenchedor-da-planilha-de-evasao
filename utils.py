@@ -83,4 +83,51 @@ def criar_resumo_relatorio(status_info: Dict) -> str:
     if detalhes.get('enviado para processamento em'):
         linhas.append(f"Enviado: {detalhes['enviado para processamento em']}")
     if detalhes.get('processado_em') and detalhes['processado_em'] not in ['---', '']:
-        linhas.append(f"Processado em: {detalhes['processado_em']
+        linhas.append(f"Processado em: {detalhes['processado_em']}")
+    
+    linhas.append("")
+    linhas.append("FILTROS APLICADOS:")
+    linhas.append("-" * 30)
+    
+    # Filtros
+    for chave, valor in filtros.items():
+        if valor and valor != '-':
+            linhas.append(f"  {chave}: {valor}")
+    
+    # Etapas
+    if status_info.get('etapas'):
+        linhas.append("")
+        linhas.append("ETAPAS DO PROCESSAMENTO:")
+        linhas.append("-" * 30)
+        for etapa in status_info['etapas']:
+            linhas.append(f"  {etapa}")
+    
+    return "\n".join(linhas)
+
+def calcular_tempo_estimado(status: str, etapas: List[str]) -> int:
+    """Calcula tempo estimado baseado no status atual"""
+    # Estimativas em segundos
+    estimativas = {
+        'EM_PROCESSAMENTO': 300,  # 5 minutos
+        'PROCESSADO': 60,  # 1 minuto
+        'DESCONHECIDO': 600  # 10 minutos
+    }
+    
+    return estimativas.get(status, 300)
+
+def verificar_espaco_disco(caminho: str, tamanho_minimo_mb: int = 100) -> bool:
+    """Verifica se há espaço em disco suficiente"""
+    try:
+        import shutil
+        _, _, livre = shutil.disk_usage(caminho)
+        livre_mb = livre / (1024 * 1024)
+        
+        if livre_mb < tamanho_minimo_mb:
+            logger.warning(f"Espaço em disco insuficiente: {livre_mb:.1f}MB disponíveis")
+            return False
+        
+        logger.info(f"Espaço em disco disponível: {livre_mb:.1f}MB")
+        return True
+    except Exception as e:
+        logger.error(f"Erro ao verificar espaço em disco: {str(e)}")
+        return True  # Assume que há espaço para não bloquear o processo
