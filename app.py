@@ -1,4 +1,4 @@
-# app.py - VERSÃO CORRIGIDA
+# app.py - VERSÃO CORRIGIDA PARA PERÍODOS
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
@@ -31,7 +31,7 @@ if 'selected_periodos' not in st.session_state:
 if 'formas_ingresso_selecionadas' not in st.session_state:
     st.session_state.formas_ingresso_selecionadas = []
 
-# Funções para login
+# Funções para login (mantidas)
 def extract_login_parameters(html_content):
     soup = BeautifulSoup(html_content, 'html.parser')
     login_form = soup.find('form', {'id': 'kc-form-login'})
@@ -103,23 +103,16 @@ def perform_login(session, base_url, username, password):
             if "administracaoacademica" in login_response.url:
                 return True
             else:
-                # Verificar se há mensagem de erro
-                soup = BeautifulSoup(login_response.text, 'html.parser')
-                error_div = soup.find('div', {'class': 'alert-error'})
-                if error_div:
-                    st.error(f"Erro: {error_div.get_text(strip=True)}")
                 return False
         
         return False
         
-    except requests.exceptions.RequestException as e:
-        st.error(f"Erro de conexão: {str(e)}")
+    except requests.exceptions.RequestException:
         return False
-    except Exception as e:
-        st.error(f"Erro inesperado: {str(e)}")
+    except Exception:
         return False
 
-# Funções para extrair dados do formulário
+# Função para extrair parâmetros do formulário
 def extract_form_parameters(session):
     """Extrai parâmetros do formulário de listagem de alunos"""
     try:
@@ -129,15 +122,11 @@ def extract_form_parameters(session):
         )
         
         if response.status_code != 200:
-            st.error(f"Erro ao acessar página: {response.status_code}")
             return None
         
         soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Encontrar o formulário principal
         form = soup.find('form', {'id': 'rel_filtros'})
         if not form:
-            st.error("Formulário não encontrado")
             return None
         
         # Extrair token CSRF
@@ -190,11 +179,55 @@ def extract_form_parameters(session):
             'action': form.get('action', '')
         }
         
-    except Exception as e:
-        st.error(f"Erro ao extrair parâmetros: {str(e)}")
+    except Exception:
         return None
 
-# Interface de seleção de período
+# Funções auxiliares para processamento de períodos
+def parse_periodo_texto(periodo_texto):
+    """Extrai ano e semestre de um texto de período"""
+    if not periodo_texto:
+        return None, None
+    
+    match = re.search(r'(\d{4})\s*/\s*(\d+)', periodo_texto)
+    if match:
+        try:
+            ano = int(match.group(1))
+            semestre = int(match.group(2).replace('º', '').replace('°', ''))
+            return ano, semestre
+        except:
+            return None, None
+    
+    return None, None
+
+def comparar_periodos(periodo1, periodo2):
+    """Compara dois períodos, retorna -1 se periodo1 < periodo2, 0 se iguais, 1 se periodo1 > periodo2"""
+    ano1, sem1 = parse_periodo_texto(periodo1)
+    ano2, sem2 = parse_periodo_texto(periodo2)
+    
+    if ano1 is None or ano2 is None:
+        return 0
+    
+    if ano1 < ano2:
+        return -1
+    elif ano1 > ano2:
+        return 1
+    else:
+        # Anos iguais, comparar semestres
+        if sem1 < sem2:
+            return -1
+        elif sem1 > sem2:
+            return 1
+        else:
+            return 0
+
+def get_indice_periodo(periodo_texto, periodos_lista):
+    """Obtém índice de um período na lista de períodos"""
+    for i, periodo in enumerate(periodos_lista):
+        if periodo == periodo_texto:
+            return i
+    return 0
+
+# Interface de seleção de período - CORRIGIDA
 def etapa_selecao_periodo():
     """Interface para seleção de período e cursos"""
     
@@ -206,10 +239,9 @@ def etapa_selecao_periodo():
             st.session_state.form_params = extract_form_parameters(st.session_state.session)
     
     if st.session_state.form_params is None:
-        st.error("Não foi possível carregar os dados do sistema. Verifique sua conexão.")
+        st.error("Não foi possível carregar os dados do sistema.")
         return False
     
-    # Dados disponíveis
     form_params = st.session_state.form_params
     
     # Criar interface de seleção
@@ -218,7 +250,7 @@ def etapa_selecao_periodo():
     with col1:
         st.subheader("📊 Parâmetros da Consulta")
         
-        # Localidade (fixa como Niterói conforme especificado)
+        # Localidade (fixa como Niterói)
         localidades = form_params.get('localidades', [])
         localidade_niteroi = next((loc for loc in localidades if loc['value'] == '1'), None)
         
@@ -229,35 +261,34 @@ def etapa_selecao_periodo():
             st.error("Localidade Niterói não encontrada")
             return False
         
-        # Forma de Ingresso - SELECIONAR AMBOS OS SISUS
+        # Forma de Ingresso - AMBOS SISUS PRÉ-SELECIONADOS
         formas_ingresso = form_params.get('formas_ingresso', [])
-        
-        # Filtrar apenas SISU
         formas_sisu = [f for f in formas_ingresso if 'SISU' in f['text']]
         
         if len(formas_sisu) >= 2:
-            # Seleção múltipla para SISU 1ª e 2ª Edição
-            sisu_options = [f['text'] for f in formas_sisu]
-            formas_selecionadas = st.multiselect(
-                "Formas de Ingresso (SISU):",
-                options=sisu_options,
-                default=sisu_options[:2],  # Pré-selecionar os dois primeiros SISU
-                help="Selecione SISU 1ª Edição para 1º semestre e SISU 2ª Edição para 2º semestre"
-            )
+            # Separar SISU 1ª e 2ª Edição
+            sisu_1 = next((f for f in formas_sisu if '1ª' in f['text'] or '1º' in f['text']), None)
+            sisu_2 = next((f for f in formas_sisu if '2ª' in f['text'] or '2º' in f['text']), None)
             
-            if len(formas_selecionadas) != 2:
-                st.warning("⚠️ É necessário selecionar AMBOS: SISU 1ª Edição e SISU 2ª Edição")
-                formas_ingresso_valores = []
+            formas_selecionadas = []
+            formas_valores = []
+            
+            if sisu_1:
+                formas_selecionadas.append(sisu_1['text'])
+                formas_valores.append(sisu_1['value'])
+                st.success(f"✅ {sisu_1['text']}")
+            
+            if sisu_2:
+                formas_selecionadas.append(sisu_2['text'])
+                formas_valores.append(sisu_2['value'])
+                st.success(f"✅ {sisu_2['text']}")
+            
+            if len(formas_selecionadas) == 2:
+                st.success("✅ Ambos SISU 1ª e 2ª Edição selecionados")
             else:
-                # Mapear textos selecionados para valores
-                formas_ingresso_valores = []
-                for forma in formas_sisu:
-                    if forma['text'] in formas_selecionadas:
-                        formas_ingresso_valores.append(forma['value'])
-                
-                st.success(f"✅ Formas de ingresso selecionadas: {', '.join(formas_selecionadas)}")
+                st.warning("⚠️ Nem todas as formas SISU foram encontradas")
         else:
-            st.error("Formas de ingresso SISU não encontradas no sistema")
+            st.error("Formas de ingresso SISU não encontradas")
             return False
     
     with col2:
@@ -270,91 +301,76 @@ def etapa_selecao_periodo():
             st.error("Nenhum período disponível")
             return False
         
-        # Converter para lista de textos e valores
-        periodo_textos = [p['text'] for p in periodos]
-        periodo_valores = {p['text']: p['value'] for p in periodos}
+        # Converter para lista de textos
+        periodo_textos = [p['text'] for p in periodos if p['text'] != '--- Todos ---']
+        periodo_valores = {p['text']: p['value'] for p in periodos if p['text'] != '--- Todos ---'}
         
-        # Encontrar índices para 2025.1 e 2025.2 (ou os mais recentes)
-        def encontrar_indice_periodo(texto_busca):
-            for i, texto in enumerate(periodo_textos):
-                if texto_busca in texto:
-                    return i
-            return 0
+        if not periodo_textos:
+            st.error("Períodos não disponíveis")
+            return False
         
-        # Tentar encontrar 2025
-        idx_2025_1 = encontrar_indice_periodo("2025 / 1")
-        idx_2025_2 = encontrar_indice_periodo("2025 / 2")
+        # Ordenar períodos do mais antigo para o mais recente
+        # Primeiro extrair ano e semestre para ordenação
+        periodos_com_info = []
+        for texto in periodo_textos:
+            ano, semestre = parse_periodo_texto(texto)
+            if ano and semestre:
+                periodos_com_info.append({
+                    'texto': texto,
+                    'ano': ano,
+                    'semestre': semestre,
+                    'valor_ordenacao': ano * 10 + semestre
+                })
         
-        # Se não encontrar 2025, usar os mais recentes
-        if idx_2025_1 == 0 and idx_2025_2 == 0:
-            idx_2025_1 = 1  # Segundo mais recente (o primeiro é "--- Todos ---")
-            idx_2025_2 = 2  # Terceiro mais recente
+        # Ordenar do mais antigo (menor valor) para mais recente (maior valor)
+        periodos_com_info.sort(key=lambda x: x['valor_ordenacao'])
+        periodo_textos_ordenados = [p['texto'] for p in periodos_com_info]
         
-        # Período Inicial
+        # Encontrar índices para período inicial (mais antigo) e final (mais recente)
+        idx_inicial = 0  # Mais antigo
+        idx_final = len(periodo_textos_ordenados) - 1  # Mais recente
+        
+        # Período Inicial (MAIS ANTIGO - início do intervalo)
         periodo_inicial_texto = st.selectbox(
-            "Período Inicial",
-            options=periodo_textos,
-            index=idx_2025_1,
-            help="Selecione o período letivo inicial para análise"
+            "Período Inicial (início do intervalo)",
+            options=periodo_textos_ordenados,
+            index=idx_inicial,
+            help="Selecione o período mais ANTIGO do intervalo de análise"
         )
         
-        # Período Final
-        # Encontrar índice do período inicial
-        periodo_inicial_idx = periodo_textos.index(periodo_inicial_texto)
+        # Período Final (MAIS RECENTE - fim do intervalo)
+        # Encontrar índice do período inicial selecionado
+        periodo_inicial_idx = periodo_textos_ordenados.index(periodo_inicial_texto)
         
-        # Filtrar períodos que são iguais ou posteriores ao inicial
-        periodos_finais_disponiveis = periodo_textos[periodo_inicial_idx:]
+        # Filtrar períodos que são IGUAIS OU POSTERIORES ao inicial
+        periodos_finais_disponiveis = periodo_textos_ordenados[periodo_inicial_idx:]
         
-        # Encontrar índice do período final (padrão: um período após o inicial)
-        idx_final = 0
-        if len(periodos_finais_disponiveis) > 1:
-            # Tentar encontrar 2025.2 se disponível
-            for i, periodo in enumerate(periodos_finais_disponiveis):
-                if "2025 / 2" in periodo:
-                    idx_final = i
-                    break
-            if idx_final == 0 and len(periodos_finais_disponiveis) > 1:
-                idx_final = 1  # Próximo período
+        # Índice padrão para período final (o mais recente disponível)
+        idx_final_disponivel = len(periodos_finais_disponiveis) - 1
         
         periodo_final_texto = st.selectbox(
-            "Período Final",
+            "Período Final (fim do intervalo)",
             options=periodos_finais_disponiveis,
-            index=idx_final,
-            help="Selecione o período letivo final para análise"
+            index=idx_final_disponivel,
+            help="Selecione o período mais RECENTE do intervalo de análise"
         )
         
-        # Validar seleção
+        # Validação CORRIGIDA - permitir período inicial ANTERIOR ao final
         if periodo_inicial_texto and periodo_final_texto:
-            # Extrair ano e semestre para validação
-            def parse_periodo_texto(texto):
-                match = re.search(r'(\d{4})\s*/\s*(\d+)', texto)
-                if match:
-                    ano = int(match.group(1))
-                    semestre = int(match.group(2).replace('º', '').replace('°', ''))
-                    return ano, semestre
-                return None, None
+            resultado_comparacao = comparar_periodos(periodo_inicial_texto, periodo_final_texto)
             
-            ano_inicial, sem_inicial = parse_periodo_texto(periodo_inicial_texto)
-            ano_final, sem_final = parse_periodo_texto(periodo_final_texto)
-            
-            if ano_inicial and ano_final:
-                # Calcular valor numérico para comparação
-                valor_inicial = ano_inicial * 10 + sem_inicial
-                valor_final = ano_final * 10 + sem_final
-                
-                if valor_final < valor_inicial:
-                    st.error("❌ Período final não pode ser anterior ao período inicial")
-                    return False
-                elif valor_final == valor_inicial:
-                    st.warning("⚠️ Período inicial e final são iguais")
-                else:
-                    st.success(f"✅ Período selecionado: {periodo_inicial_texto} a {periodo_final_texto}")
+            if resultado_comparacao == 0:
+                st.info("⚠️ Período inicial e final são iguais")
+            elif resultado_comparacao == -1:
+                st.success(f"✅ Intervalo válido: {periodo_inicial_texto} a {periodo_final_texto}")
+            else:
+                st.error("❌ Período inicial deve ser ANTERIOR ou IGUAL ao período final")
+                return False
     
     # Seleção de Cursos
     st.markdown("---")
     st.subheader("📚 Cursos para Análise")
     
-    # Cursos pré-definidos conforme especificação
     cursos_disponiveis = [
         {
             'nome': 'Química (Licenciatura)',
@@ -376,76 +392,76 @@ def etapa_selecao_periodo():
         }
     ]
     
-    # Seleção múltipla de cursos
+    # Seleção múltipla com todos pré-selecionados
     cursos_selecionados_nomes = st.multiselect(
         "Selecione os cursos para análise:",
         options=[curso['nome'] for curso in cursos_disponiveis],
-        default=[curso['nome'] for curso in cursos_disponiveis],  # Todos pré-selecionados
-        help="Selecione os 3 cursos de Química para análise de evasão"
+        default=[curso['nome'] for curso in cursos_disponiveis],
+        help="Os 3 cursos de Química estão pré-selecionados"
     )
     
-    # Mapear nomes selecionados para objetos de curso
+    # Mapear para objetos
     cursos_selecionados_objetos = []
     for curso_nome in cursos_selecionados_nomes:
         curso_obj = next((c for c in cursos_disponiveis if c['nome'] == curso_nome), None)
         if curso_obj:
             cursos_selecionados_objetos.append(curso_obj)
     
-    # Botão para confirmar seleção
+    # Botão para confirmar
     st.markdown("---")
-    col1, col2, col3 = st.columns([1, 2, 1])
     
-    with col2:
-        if st.button("✅ Confirmar Seleção e Prosseguir", type="primary", use_container_width=True):
-            # Validações finais
-            if not formas_ingresso_valores or len(formas_ingresso_valores) != 2:
-                st.error("Selecione ambas as formas de ingresso SISU")
-                return False
-            
-            if not cursos_selecionados_objetos:
-                st.error("Selecione pelo menos um curso")
-                return False
-            
-            if not periodo_inicial_texto or not periodo_final_texto:
-                st.error("Selecione os períodos")
-                return False
-            
-            # Armazenar seleções
-            st.session_state.selected_cursos = cursos_selecionados_objetos
-            st.session_state.selected_periodos = {
-                'inicial': periodo_inicial_texto,
-                'final': periodo_final_texto,
-                'valor_inicial': periodo_valores.get(periodo_inicial_texto, ''),
-                'valor_final': periodo_valores.get(periodo_final_texto, '')
-            }
-            st.session_state.formas_ingresso_selecionadas = formas_ingresso_valores
-            st.session_state.localidade_selecionada = {
-                'text': localidade_niteroi['text'],
-                'value': localidade_value
-            }
-            
-            st.success("🎉 Seleção confirmada com sucesso!")
-            time.sleep(2)
-            st.rerun()
+    if st.button("✅ Confirmar Seleção e Prosseguir", type="primary", use_container_width=True):
+        # Validações
+        if not formas_valores or len(formas_valores) != 2:
+            st.error("As duas formas de ingresso SISU devem estar selecionadas")
+            return False
+        
+        if not cursos_selecionados_objetos:
+            st.error("Selecione pelo menos um curso")
+            return False
+        
+        if not periodo_inicial_texto or not periodo_final_texto:
+            st.error("Selecione os períodos")
+            return False
+        
+        # Validar novamente o intervalo
+        resultado = comparar_periodos(periodo_inicial_texto, periodo_final_texto)
+        if resultado == 1:  # Inicial > Final (inválido)
+            st.error("Período inicial não pode ser posterior ao final")
+            return False
+        
+        # Armazenar seleções
+        st.session_state.selected_cursos = cursos_selecionados_objetos
+        st.session_state.selected_periodos = {
+            'inicial': periodo_inicial_texto,
+            'final': periodo_final_texto,
+            'valor_inicial': periodo_valores.get(periodo_inicial_texto, ''),
+            'valor_final': periodo_valores.get(periodo_final_texto, '')
+        }
+        st.session_state.formas_ingresso_selecionadas = formas_valores
+        st.session_state.localidade_selecionada = {
+            'text': localidade_niteroi['text'],
+            'value': localidade_value
+        }
+        
+        st.success("🎉 Configuração salva com sucesso!")
+        time.sleep(1)
+        st.rerun()
     
-    # Mostrar resumo da seleção atual
+    # Mostrar pré-visualização
     if cursos_selecionados_objetos:
         with st.expander("📋 Pré-visualização da Configuração", expanded=True):
-            st.markdown("**Configuração atual:**")
-            
-            col_res1, col_res2 = st.columns(2)
-            with col_res1:
-                st.markdown(f"**Localidade:** {localidade_niteroi['text']}")
-                st.markdown(f"**Formas de Ingresso:** {', '.join(formas_selecionadas) if 'formas_selecionadas' in locals() else 'Não selecionadas'}")
-            
-            with col_res2:
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.markdown("**Localidade:** Niterói")
+                st.markdown(f"**Formas de Ingresso:** {' e '.join(formas_selecionadas)}")
+            with col_b:
                 st.markdown(f"**Período Inicial:** {periodo_inicial_texto}")
                 st.markdown(f"**Período Final:** {periodo_final_texto}")
             
-            st.markdown("**Cursos selecionados:**")
+            st.markdown("**Cursos:**")
             for curso in cursos_selecionados_objetos:
-                st.markdown(f"- **{curso['nome']}** ({curso['tipo']})")
-                st.markdown(f"  Código: `{curso['codigo']}`")
+                st.markdown(f"- {curso['nome']}")
     
     return True
 
@@ -453,7 +469,6 @@ def etapa_selecao_periodo():
 def main():
     st.title("🎓 Sistema de Análise de Evasão - UFF")
     
-    # Estado de autenticação
     if not st.session_state.authenticated:
         # Página de login
         st.markdown("### 🔐 Login no Sistema Acadêmico da UFF")
@@ -461,7 +476,7 @@ def main():
         col1, col2, col3 = st.columns([1, 2, 1])
         
         with col2:
-            with st.form("login_form", clear_on_submit=False):
+            with st.form("login_form"):
                 username = st.text_input("Identificação (idUFF)", 
                                         placeholder="CPF, email ou passaporte")
                 password = st.text_input("Senha", 
@@ -482,20 +497,13 @@ def main():
                                 st.session_state.authenticated = True
                                 st.session_state.username = username
                                 st.success("Login realizado com sucesso!")
-                                time.sleep(2)
+                                time.sleep(1)
                                 st.rerun()
                             else:
                                 st.error("Falha no login. Verifique suas credenciais.")
-            
-            st.markdown("---")
-            st.markdown("""
-            **Ajuda:**
-            - Utilize sua identificação UFF (CPF, email ou passaporte)
-            - Em caso de problemas, entre em contato com a central de atendimento
-            """)
     
     else:
-        # Menu principal após login
+        # Menu principal
         col1, col2 = st.columns([3, 1])
         
         with col1:
@@ -503,79 +511,62 @@ def main():
         
         with col2:
             if st.button("🚪 Sair", type="secondary", use_container_width=True):
-                st.session_state.authenticated = False
-                st.session_state.username = ""
-                st.session_state.session = requests.Session()
-                st.session_state.form_params = None
-                st.session_state.selected_cursos = []
-                st.session_state.selected_periodos = {}
-                st.session_state.formas_ingresso_selecionadas = []
+                for key in list(st.session_state.keys()):
+                    del st.session_state[key]
                 st.rerun()
         
         st.markdown("---")
         
-        # Barra de progresso
+        # Progresso
         st.markdown("### 📋 Progresso do Processo")
         
-        col_prog1, col_prog2, col_prog3, col_prog4, col_prog5 = st.columns(5)
+        cols = st.columns(5)
+        etapas = [
+            ("1. Login", "✅" if st.session_state.authenticated else "⏳"),
+            ("2. Período", "✅" if st.session_state.selected_periodos else "🔄"),
+            ("3. Consulta", "⏳"),
+            ("4. Processamento", "⏳"),
+            ("5. Planilha", "⏳")
+        ]
         
-        with col_prog1:
-            st.markdown("**1. Login**")
-            st.success("✅")
-        
-        with col_prog2:
-            st.markdown("**2. Período**")
-            if st.session_state.selected_periodos:
-                st.success("✅")
-            else:
-                st.info("🔄")
-        
-        with col_prog3:
-            st.markdown("**3. Consulta**")
-            st.info("⏳")
-        
-        with col_prog4:
-            st.markdown("**4. Processamento**")
-            st.info("⏳")
-        
-        with col_prog5:
-            st.markdown("**5. Planilha**")
-            st.info("⏳")
+        for col, (etapa, status) in zip(cols, etapas):
+            with col:
+                st.markdown(f"**{etapa}**")
+                st.markdown(status)
         
         st.markdown("---")
         
         # Conteúdo principal
         if not st.session_state.selected_periodos:
-            # Etapa 2 - Seleção de período
             etapa_selecao_periodo()
         else:
-            # Mostrar resumo e preparar para próxima etapa
+            # Mostrar resumo
             st.markdown("## 🎯 Configuração Confirmada")
             
             with st.expander("📊 Resumo da Configuração", expanded=True):
                 periodos = st.session_state.selected_periodos
                 cursos = st.session_state.selected_cursos
-                formas_ingresso = st.session_state.formas_ingresso_selecionadas
                 
-                col_res1, col_res2 = st.columns(2)
-                
-                with col_res1:
-                    st.markdown("**Período Analisado:**")
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.markdown("**📅 Período Analisado**")
                     st.info(f"**Início:** {periodos['inicial']}")
                     st.info(f"**Término:** {periodos['final']}")
-                    st.markdown(f"**Localidade:** Niterói")
+                    st.markdown(f"**📍 Localidade:** Niterói")
                     
-                    # Recuperar nomes das formas de ingresso
+                    # Recuperar nomes SISU
                     formas_nomes = []
-                    if st.session_state.form_params and 'formas_ingresso' in st.session_state.form_params:
-                        for forma in st.session_state.form_params['formas_ingresso']:
-                            if forma['value'] in formas_ingresso:
+                    if st.session_state.form_params:
+                        for forma in st.session_state.form_params.get('formas_ingresso', []):
+                            if forma['value'] in st.session_state.formas_ingresso_selecionadas:
                                 formas_nomes.append(forma['text'])
                     
-                    st.markdown(f"**Formas de Ingresso:** {', '.join(formas_nomes) if formas_nomes else 'SISU 1ª e 2ª Edição'}")
+                    st.markdown(f"**🎯 Formas de Ingresso:**")
+                    for nome in formas_nomes:
+                        st.markdown(f"- {nome}")
                 
-                with col_res2:
-                    st.markdown("**Cursos Selecionados:**")
+                with col_b:
+                    st.markdown("**📚 Cursos Selecionados**")
                     for i, curso in enumerate(cursos, 1):
                         st.markdown(f"{i}. **{curso['nome']}**")
                         st.markdown(f"   Tipo: {curso['tipo']}")
@@ -586,41 +577,24 @@ def main():
             
             st.info("""
             **A Etapa 3 irá:**
-            1. Acessar automaticamente o sistema acadêmico
-            2. Consultar relatórios para cada curso selecionado
-            3. Coletar dados de matrículas e cancelamentos
-            4. Preparar dados para processamento
+            1. Acessar o sistema acadêmico
+            2. Consultar relatórios para cada curso
+            3. Coletar dados de matrículas
+            4. Preparar para processamento
             """)
             
-            # Botões de controle
-            col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
+            col_btn1, col_btn2 = st.columns(2)
+            with col_btn1:
+                if st.button("🔍 Iniciar Consulta", type="primary", use_container_width=True):
+                    st.session_state.etapa_atual = 3
+                    st.info("Iniciando consulta...")
             
             with col_btn2:
-                if st.button("🔍 Iniciar Consulta de Relatórios", type="primary", use_container_width=True):
-                    st.session_state.etapa_atual = 3
-                    st.info("⏳ Iniciando consulta... (Etapa 3 em desenvolvimento)")
-                
                 if st.button("🔄 Alterar Configuração", type="secondary", use_container_width=True):
                     st.session_state.selected_periodos = {}
                     st.session_state.selected_cursos = []
                     st.session_state.formas_ingresso_selecionadas = []
                     st.rerun()
-        
-        # Informações técnicas
-        with st.expander("🔧 Informações Técnicas"):
-            status_info = f"""
-            Status: {'Autenticado' if st.session_state.authenticated else 'Não autenticado'}
-            Usuário: {st.session_state.username}
-            Cookies ativos: {len(st.session_state.session.cookies)}
-            """
-            
-            if st.session_state.selected_periodos:
-                status_info += f"""
-                Período configurado: {st.session_state.selected_periodos.get('inicial', 'N/A')} a {st.session_state.selected_periodos.get('final', 'N/A')}
-                Cursos selecionados: {len(st.session_state.selected_cursos)}
-                """
-            
-            st.code(status_info)
 
 if __name__ == "__main__":
     main()
