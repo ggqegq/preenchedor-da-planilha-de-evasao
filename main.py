@@ -554,7 +554,525 @@ else:
                     st.markdown("**Cursos:**")
                     for curso in cursos_selecionados_objetos:
                         st.markdown(f"- {curso['nome']}")
+
+# ADICIONE ESTAS FUNÇÕES NO SEU main.py (antes da seção "Etapa 3"):
+
+def buscar_cursos_por_localidade(session, localidade_id):
+    """Busca cursos disponíveis para uma localidade"""
+    try:
+        url = f"{APLICACAO_URL}/relatorios/listagens_alunos/cursos?localidade={localidade_id}"
+        response = session.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            cursos = []
+            
+            for option in soup.find_all('option'):
+                if option.get('value') and option.get('value') != '':
+                    cursos.append({
+                        'value': option['value'],
+                        'text': option.get_text(strip=True)
+                    })
+            
+            return cursos
+    except Exception as e:
+        logger.error(f"Erro ao buscar cursos: {str(e)}")
     
+    return []
+
+def buscar_desdobramentos_por_curso(session, curso_id):
+    """Busca desdobramentos disponíveis para um curso"""
+    try:
+        url = f"{APLICACAO_URL}/relatorios/listagens_alunos/desdobramentos?curso={curso_id}"
+        response = session.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            desdobramentos = []
+            
+            for option in soup.find_all('option'):
+                if option.get('value') and option.get('value') != '':
+                    desdobramentos.append({
+                        'value': option['value'],
+                        'text': option.get_text(strip=True)
+                    })
+            
+            return desdobramentos
+    except Exception as e:
+        logger.error(f"Erro ao buscar desdobramentos: {str(e)}")
+    
+    return []
+
+def encontrar_desdobramento_curso(desdobramentos, texto_busca):
+    """Encontra o desdobramento correspondente ao curso"""
+    if not desdobramentos:
+        return None
+    
+    for desdobramento in desdobramentos:
+        if texto_busca in desdobramento['text']:
+            return desdobramento
+    
+    # Se não encontrar exato, procurar por similaridade
+    for desdobramento in desdobramentos:
+        if 'química' in desdobramento['text'].lower():
+            return desdobramento
+    
+    return None
+
+def gerar_relatorio_xlsx(session, form_data):
+    """Gera e baixa relatório em XLSX"""
+    try:
+        url = f"{APLICACAO_URL}/relatorios/listagens_alunos"
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': url,
+            'Origin': BASE_URL,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+            'Content-Type': 'application/x-www-form-urlencoded',
+        }
+        
+        # Adicionar formato XLSX
+        form_data['format'] = 'xls'
+        
+        response = session.post(
+            url,
+            data=form_data,
+            headers=headers,
+            timeout=30,
+            allow_redirects=True
+        )
+        
+        if response.status_code == 200:
+            # Verificar se foi redirecionado para página de relatório
+            if '/relatorios/' in response.url and 'listagens_alunos' not in response.url:
+                # Extrair ID do relatório da URL
+                match = re.search(r'/relatorios/(\d+)', response.url)
+                if match:
+                    relatorio_id = match.group(1)
+                    logger.info(f"Relatório criado com ID: {relatorio_id}")
+                    return {
+                        'success': True,
+                        'relatorio_id': relatorio_id,
+                        'url_relatorio': response.url,
+                        'html': response.text
+                    }
+            
+            # Verificar se é um arquivo XLSX (download direto)
+            content_type = response.headers.get('content-type', '')
+            if 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' in content_type or \
+               'xlsx' in content_type or \
+               'excel' in content_type.lower():
+                
+                # Retornar conteúdo do arquivo
+                return {
+                    'success': True,
+                    'conteudo': response.content,
+                    'diretamente': True
+                }
+        
+        return {
+            'success': False,
+            'error': f"Status code: {response.status_code}",
+            'html': response.text[:500] if response.text else ''
+        }
+        
+    except Exception as e:
+        logger.error(f"Erro ao gerar relatório: {str(e)}")
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+def monitorar_relatorio(session, relatorio_id, progress_callback=None):
+    """Monitora o processamento de um relatório"""
+    try:
+        url = f"{APLICACAO_URL}/relatorios/{relatorio_id}"
+        
+        for tentativa in range(60):  # 60 tentativas (5 minutos se 5 segundos cada)
+            response = session.get(url, timeout=10)
+            
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # Verificar se está pronto
+                if 'O relatório está pronto!' in response.text or 'Download' in response.text:
+                    # Procurar link de download
+                    for link in soup.find_all('a', href=True):
+                        if 'download' in link['href'].lower() or '.xlsx' in link['href'].lower():
+                            download_url = link['href']
+                            if not download_url.startswith('http'):
+                                download_url = f"{APLICACAO_URL}{download_url}"
+                            
+                            return {
+                                'success': True,
+                                'pronto': True,
+                                'download_url': download_url,
+                                'html': response.text
+                            }
+                
+                # Verificar se ainda está processando
+                if 'Processando...' in response.text or 'Aguardando' in response.text:
+                    if progress_callback:
+                        progress_callback(tentativa, 60, f"Processando... tentativa {tentativa+1}/60")
+                    time.sleep(5)  # Aguardar 5 segundos antes de verificar novamente
+                    continue
+                
+                # Se chegou aqui, algo deu errado
+                return {
+                    'success': False,
+                    'error': 'Não foi possível determinar o status do relatório'
+                }
+        
+        return {
+            'success': False,
+            'error': 'Timeout no processamento do relatório'
+        }
+            
+    except Exception as e:
+        logger.error(f"Erro ao monitorar relatório: {str(e)}")
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+def baixar_relatorio_xlsx(session, download_url, nome_arquivo):
+    """Baixa o relatório XLSX"""
+    try:
+        response = session.get(download_url, timeout=30, stream=True)
+        
+        if response.status_code == 200:
+            # Criar pasta se não existir
+            os.makedirs(PASTA_RELATORIOS, exist_ok=True)
+            
+            caminho_arquivo = os.path.join(PASTA_RELATORIOS, nome_arquivo)
+            
+            with open(caminho_arquivo, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
+            # Verificar se é um arquivo Excel válido
+            try:
+                df = pd.read_excel(caminho_arquivo, nrows=5)
+                return {
+                    'success': True,
+                    'caminho': caminho_arquivo,
+                    'df': df,
+                    'tamanho': os.path.getsize(caminho_arquivo)
+                }
+            except Exception as e:
+                logger.warning(f"Arquivo baixado mas pode não ser Excel válido: {str(e)}")
+                return {
+                    'success': True,
+                    'caminho': caminho_arquivo,
+                    'df': None,
+                    'tamanho': os.path.getsize(caminho_arquivo)
+                }
+        else:
+            return {
+                'success': False,
+                'error': f"Erro HTTP {response.status_code} ao baixar"
+            }
+            
+    except Exception as e:
+        logger.error(f"Erro ao baixar relatório: {str(e)}")
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+def processar_consulta_relatorios():
+    """Processa a consulta de relatórios para todos os cursos selecionados"""
+    
+    st.session_state.relatorios_baixados = {}
+    st.session_state.dados_processados = {}
+    
+    # Configurações base
+    config = {
+        'localidade': st.session_state.localidade_selecionada['value'],
+        'forma_ingresso': st.session_state.formas_ingresso_selecionadas,
+        'periodo_inicial': st.session_state.selected_periodos['valor_inicial'],
+        'periodo_final': st.session_state.selected_periodos['valor_final'],
+        'csrf_token': st.session_state.form_params['csrf_token'] if st.session_state.form_params else ''
+    }
+    
+    # Para cada curso selecionado
+    cursos = st.session_state.selected_cursos
+    total_cursos = len(cursos)
+    
+    # Barra de progresso principal
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    mensagens = st.empty()
+    
+    resultados = {}
+    
+    for idx, curso in enumerate(cursos):
+        curso_nome = curso['nome']
+        codigo_curso = curso['codigo']
+        desdobramento_texto = curso['desdobramento']
+        
+        # Atualizar progresso principal
+        progresso_principal = idx / total_cursos
+        progress_bar.progress(progresso_principal)
+        status_text.text(f"Processando curso {idx+1}/{total_cursos}: {curso_nome}")
+        
+        try:
+            # 1. Buscar cursos disponíveis
+            mensagens.text(f"Buscando cursos para {curso_nome}...")
+            cursos_disponiveis = buscar_cursos_por_localidade(
+                st.session_state.authenticator.session, 
+                config['localidade']
+            )
+            
+            if not cursos_disponiveis:
+                resultados[curso_nome] = {
+                    'status': 'erro',
+                    'mensagem': 'Nenhum curso encontrado'
+                }
+                continue
+            
+            # 2. Encontrar o curso específico
+            curso_encontrado = None
+            for curso_disp in cursos_disponiveis:
+                if codigo_curso in curso_disp['text'] or curso_nome.lower() in curso_disp['text'].lower():
+                    curso_encontrado = curso_disp
+                    break
+            
+            if not curso_encontrado:
+                resultados[curso_nome] = {
+                    'status': 'erro', 
+                    'mensagem': f'Curso não encontrado no sistema'
+                }
+                continue
+            
+            # 3. Buscar desdobramentos
+            mensagens.text(f"Buscando desdobramentos para {curso_nome}...")
+            desdobramentos = buscar_desdobramentos_por_curso(
+                st.session_state.authenticator.session,
+                curso_encontrado['value']
+            )
+            
+            if not desdobramentos:
+                resultados[curso_nome] = {
+                    'status': 'erro',
+                    'mensagem': 'Nenhum desdobramento encontrado'
+                }
+                continue
+            
+            # 4. Encontrar desdobramento específico
+            desdobramento_encontrado = encontrar_desdobramento_curso(
+                desdobramentos,
+                desdobramento_texto
+            )
+            
+            if not desdobramento_encontrado:
+                # Usar o primeiro desdobramento disponível
+                desdobramento_encontrado = desdobramentos[0]
+            
+            # 5. Preparar dados do formulário
+            form_data = {
+                'authenticity_token': config['csrf_token'],
+                'utf8': '✓',
+                'idlocalidade': config['localidade'],
+                'idcurso': curso_encontrado['value'],
+                'iddesdobramento': desdobramento_encontrado['value'],
+                'idturno': '',  # Todos
+                'idstatusaluno': '',  # Todos
+                'idsituacaoaluno': '',  # Todos
+                'idformaingresso': config['forma_ingresso'][0],  # Primeiro SISU
+                'idacaoafirmativa': '',  # Todos
+                'anosem_ingresso': config['periodo_inicial'],
+                'anosem_desvinculacao': ''  # Todos
+            }
+            
+            # 6. Gerar relatório
+            mensagens.text(f"Gerando relatório para {curso_nome}...")
+            resultado_geracao = gerar_relatorio_xlsx(
+                st.session_state.authenticator.session,
+                form_data
+            )
+            
+            if not resultado_geracao['success']:
+                resultados[curso_nome] = {
+                    'status': 'erro',
+                    'mensagem': f"Falha na geração: {resultado_geracao.get('error', 'Erro desconhecido')}"
+                }
+                continue
+            
+            # 7. Se for download direto
+            if resultado_geracao.get('diretamente'):
+                # Salvar arquivo
+                nome_arquivo = f"relatorio_{curso_nome.replace(' ', '_').lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                caminho = os.path.join(PASTA_RELATORIOS, nome_arquivo)
+                
+                with open(caminho, 'wb') as f:
+                    f.write(resultado_geracao['conteudo'])
+                
+                # Tentar ler como DataFrame
+                try:
+                    df = pd.read_excel(caminho)
+                    st.session_state.relatorios_baixados[curso_nome] = {
+                        'df': df,
+                        'caminho': caminho,
+                        'status': 'sucesso',
+                        'linhas': len(df),
+                        'tipo': 'diretamente'
+                    }
+                    
+                    resultados[curso_nome] = {
+                        'status': 'sucesso',
+                        'mensagem': f'Relatório baixado diretamente ({len(df)} linhas)'
+                    }
+                except Exception as e:
+                    st.session_state.relatorios_baixados[curso_nome] = {
+                        'caminho': caminho,
+                        'status': 'sucesso',
+                        'tipo': 'diretamente'
+                    }
+                    
+                    resultados[curso_nome] = {
+                        'status': 'sucesso',
+                        'mensagem': 'Arquivo baixado (não processado como Excel)'
+                    }
+            
+            # 8. Se for relatório assíncrono (com ID)
+            elif resultado_geracao.get('relatorio_id'):
+                relatorio_id = resultado_geracao['relatorio_id']
+                
+                # Monitorar processamento
+                mensagens.text(f"Monitorando processamento do relatório #{relatorio_id}...")
+                
+                def callback_progresso(tentativa, total, mensagem):
+                    progresso_detalhado = tentativa / total
+                    mensagens.text(f"{mensagem} - {progresso_detalhado*100:.1f}%")
+                
+                resultado_monitoramento = monitorar_relatorio(
+                    st.session_state.authenticator.session,
+                    relatorio_id,
+                    progress_callback=callback_progresso
+                )
+                
+                if resultado_monitoramento['success'] and resultado_monitoramento.get('pronto'):
+                    # Baixar relatório
+                    nome_arquivo = f"relatorio_{curso_nome.replace(' ', '_').lower()}_{relatorio_id}.xlsx"
+                    resultado_download = baixar_relatorio_xlsx(
+                        st.session_state.authenticator.session,
+                        resultado_monitoramento['download_url'],
+                        nome_arquivo
+                    )
+                    
+                    if resultado_download['success']:
+                        if resultado_download.get('df') is not None:
+                            st.session_state.relatorios_baixados[curso_nome] = {
+                                'df': resultado_download['df'],
+                                'caminho': resultado_download['caminho'],
+                                'status': 'sucesso',
+                                'linhas': len(resultado_download['df']),
+                                'relatorio_id': relatorio_id
+                            }
+                            
+                            resultados[curso_nome] = {
+                                'status': 'sucesso',
+                                'mensagem': f'Relatório baixado ({len(resultado_download["df"])} linhas)'
+                            }
+                        else:
+                            st.session_state.relatorios_baixados[curso_nome] = {
+                                'caminho': resultado_download['caminho'],
+                                'status': 'sucesso',
+                                'relatorio_id': relatorio_id
+                            }
+                            
+                            resultados[curso_nome] = {
+                                'status': 'sucesso',
+                                'mensagem': 'Arquivo baixado'
+                            }
+                    else:
+                        resultados[curso_nome] = {
+                            'status': 'erro',
+                            'mensagem': f"Falha no download: {resultado_download.get('error', 'Erro desconhecido')}"
+                        }
+                else:
+                    resultados[curso_nome] = {
+                        'status': 'erro',
+                        'mensagem': f"Falha no monitoramento: {resultado_monitoramento.get('error', 'Erro desconhecido')}"
+                    }
+            
+            else:
+                resultados[curso_nome] = {
+                    'status': 'erro',
+                    'mensagem': 'Formato de resposta inesperado do servidor'
+                }
+                
+        except Exception as e:
+            logger.error(f"Erro no processamento do curso {curso_nome}: {str(e)}", exc_info=True)
+            resultados[curso_nome] = {
+                'status': 'erro',
+                'mensagem': f'Erro: {str(e)}'
+            }
+        
+        # Pequena pausa entre requisições
+        time.sleep(2)
+    
+    # Finalizar
+    progress_bar.progress(1.0)
+    status_text.text("Consulta concluída!")
+    mensagens.empty()
+    
+    return resultados
+
+# ADICIONE ESTA FUNÇÃO TAMBÉM (para pré-processar dados):
+def preprocessar_dados_relatorio(df):
+    """Pré-processa dados do relatório para análise"""
+    if df is None or df.empty:
+        return {}
+    
+    # Criar cópia para não modificar o original
+    df_processed = df.copy()
+    
+    # Converter nomes de colunas para minúsculas e remover espaços
+    df_processed.columns = [str(col).strip().lower() for col in df_processed.columns]
+    
+    # Mapear colunas esperadas
+    colunas_mapeadas = {}
+    
+    # Tentar identificar colunas importantes
+    for col in df_processed.columns:
+        col_lower = str(col).lower()
+        
+        if any(term in col_lower for term in ['matrícula', 'matricula']):
+            colunas_mapeadas['matricula'] = col
+        elif any(term in col_lower for term in ['nome', 'aluno']):
+            colunas_mapeadas['nome'] = col
+        elif any(term in col_lower for term in ['situação', 'situacao']):
+            colunas_mapeadas['situacao'] = col
+        elif any(term in col_lower for term in ['status']):
+            colunas_mapeadas['status'] = col
+        elif any(term in col_lower for term in ['ingresso', 'forma ingresso']):
+            colunas_mapeadas['forma_ingresso'] = col
+        elif any(term in col_lower for term in ['modalidade', 'ação afirmativa', 'acao afirmativa']):
+            colunas_mapeadas['modalidade_ingresso'] = col
+        elif any(term in col_lower for term in ['cancelamento', 'motivo']):
+            colunas_mapeadas['motivo_cancelamento'] = col
+    
+    # Estatísticas básicas
+    estatisticas = {
+        'total_registros': len(df_processed),
+        'colunas_identificadas': colunas_mapeadas,
+        'colunas_disponiveis': list(df_processed.columns),
+        'amostra_dados': df_processed.head(3).to_dict('records') if not df_processed.empty else []
+    }
+    
+    return {
+        'df': df_processed,
+        'estatisticas': estatisticas,
+        'colunas_mapeadas': colunas_mapeadas
+    }
+
+    
+    # SUBSTITUA A SEÇÃO COMPLETA "Etapa 3" por:
+
     # Etapa 3 - Consulta de Relatórios
     elif etapa_atual == 3:
         st.markdown("## 🔍 Etapa 3 - Consulta de Relatórios")
@@ -588,39 +1106,231 @@ else:
                 st.markdown("### ⚙️ Preparar Consulta")
                 
                 # Informações sobre o processo
-                st.info("""
-                **O que acontecerá na consulta:**
-                1. Para cada curso selecionado, o sistema irá:
-                   - Buscar o código do curso no sistema UFF
-                   - Buscar o desdobramento correto
-                   - Configurar os parâmetros do relatório
-                   - Enviar solicitação de geração do relatório XLSX
+                with st.expander("ℹ️ Informações Importantes", expanded=True):
+                    st.warning("""
+                    **⚠️ ATENÇÃO:**
+                    
+                    1. A geração de relatórios pode levar **vários minutos** por curso
+                    2. **Não feche** esta página durante o processo
+                    3. O sistema irá automaticamente:
+                       - Buscar cada curso no sistema UFF
+                       - Configurar os parâmetros corretos
+                       - Gerar o relatório XLSX
+                       - Monitorar o processamento
+                       - Baixar quando estiver pronto
+                    
+                    4. **Progresso** será mostrado em tempo real
+                    5. Se houver erros, serão exibidos com detalhes
+                    """)
                 
-                2. **Importante:** A geração de relatórios pode levar vários minutos
-                
-                3. O sistema monitorará automaticamente o processamento
-                
-                4. Quando pronto, fará o download do arquivo XLSX
-                """)
-                
-                col1, col2 = st.columns(2)
+                col1, col2, col3 = st.columns(3)
                 with col1:
                     if st.button("🚀 Iniciar Consulta de Relatórios", type="primary", use_container_width=True):
-                        # Implementar a lógica de consulta aqui
-                        st.info("Funcionalidade de consulta será implementada")
-                        # TODO: Implementar usando RelatorioUFFAutomator
+                        # Iniciar consulta
+                        st.session_state.consulta_em_andamento = True
+                        st.rerun()
                 
                 with col2:
+                    if st.button("🧪 Testar Conexão", type="secondary", use_container_width=True):
+                        with st.spinner("Testando conexão..."):
+                            try:
+                                test_url = f"{APLICACAO_URL}/relatorios/listagens_alunos"
+                                response = st.session_state.authenticator.session.get(test_url, timeout=10)
+                                if response.status_code == 200:
+                                    st.success("✅ Conexão com sistema UFF OK")
+                                else:
+                                    st.error(f"❌ Erro de conexão: {response.status_code}")
+                            except Exception as e:
+                                st.error(f"❌ Erro: {str(e)}")
+                
+                with col3:
                     if st.button("🔄 Voltar para Configuração", type="secondary", use_container_width=True):
                         st.session_state.selected_periodos = {}
                         st.session_state.selected_cursos = []
                         st.session_state.etapa_atual = 2
                         st.rerun()
             
-            # Se consulta foi concluída
-            elif st.session_state.consulta_concluida:
-                st.markdown("### 📊 Resultados da Consulta")
-                st.info("Consulta concluída anteriormente")
+            # Se a consulta está em andamento
+            elif st.session_state.get('consulta_em_andamento', False):
+                st.markdown("---")
+                st.markdown("### 🔄 Consulta em Andamento")
+                
+                # Container para logs e progresso
+                log_container = st.container()
+                
+                with log_container:
+                    # Executar a consulta
+                    resultados = processar_consulta_relatorios()
+                    
+                    # Marcar como concluída
+                    st.session_state.consulta_concluida = True
+                    st.session_state.consulta_em_andamento = False
+                    
+                    # Mostrar resultados
+                    st.markdown("### 📊 Resultados da Consulta")
+                    
+                    # Estatísticas
+                    total_cursos = len(st.session_state.selected_cursos)
+                    sucesso = 0
+                    for curso in st.session_state.selected_cursos:
+                        curso_nome = curso['nome']
+                        if (curso_nome in st.session_state.relatorios_baixados and 
+                            st.session_state.relatorios_baixados[curso_nome]['status'] == 'sucesso'):
+                            sucesso += 1
+                    
+                    erros = total_cursos - sucesso
+                    
+                    col_s1, col_s2, col_s3 = st.columns(3)
+                    with col_s1:
+                        st.metric("Total de Cursos", total_cursos)
+                    with col_s2:
+                        if total_cursos > 0:
+                            st.metric("Sucesso", sucesso, delta=f"{sucesso/total_cursos*100:.1f}%")
+                        else:
+                            st.metric("Sucesso", sucesso)
+                    with col_s3:
+                        st.metric("Erros", erros, delta_color="inverse")
+                    
+                    # Detalhes por curso
+                    st.markdown("#### 📋 Detalhes por Curso")
+                    
+                    for curso in st.session_state.selected_cursos:
+                        curso_nome = curso['nome']
+                        
+                        status_icon = "❌"
+                        if curso_nome in st.session_state.relatorios_baixados:
+                            if st.session_state.relatorios_baixados[curso_nome]['status'] == 'sucesso':
+                                status_icon = "✅"
+                        
+                        with st.expander(f"{status_icon} {curso_nome}", expanded=False):
+                            if curso_nome in st.session_state.relatorios_baixados:
+                                dados = st.session_state.relatorios_baixados[curso_nome]
+                                
+                                if dados['status'] == 'sucesso':
+                                    st.success("✅ Relatório baixado com sucesso")
+                                    
+                                    # Informações do DataFrame
+                                    if 'df' in dados and dados['df'] is not None:
+                                        df = dados['df']
+                                        st.markdown(f"**Total de registros:** {len(df):,}")
+                                        st.markdown(f"**Colunas disponíveis:** {len(df.columns)}")
+                                        
+                                        # Pré-visualização dos dados
+                                        st.markdown("**Pré-visualização:**")
+                                        st.dataframe(df.head(), use_container_width=True)
+                                        
+                                        # Pré-processar dados
+                                        dados_processados = preprocessar_dados_relatorio(df)
+                                        st.session_state.dados_processados[curso_nome] = dados_processados
+                                        
+                                        # Colunas identificadas
+                                        if dados_processados.get('colunas_mapeadas'):
+                                            st.markdown("**Colunas identificadas:**")
+                                            for chave, coluna in dados_processados['colunas_mapeadas'].items():
+                                                st.markdown(f"- `{chave}`: {coluna}")
+                                        
+                                        # Botão para download
+                                        csv = df.to_csv(index=False).encode('utf-8')
+                                        st.download_button(
+                                            label="📥 Download CSV",
+                                            data=csv,
+                                            file_name=f"relatorio_{curso_nome.replace(' ', '_').lower()}.csv",
+                                            mime="text/csv",
+                                            use_container_width=True
+                                        )
+                                    else:
+                                        if 'caminho' in dados:
+                                            st.info(f"Arquivo salvo em: {dados['caminho']}")
+                                            st.info("Não foi possível ler como DataFrame Excel")
+                                else:
+                                    st.error(f"❌ Falha: {dados.get('mensagem', 'Erro desconhecido')}")
+                            else:
+                                # Verificar se há resultado na consulta atual
+                                if curso_nome in resultados:
+                                    st.error(f"❌ {resultados[curso_nome].get('mensagem', 'Erro desconhecido')}")
+                                else:
+                                    st.warning("⏳ Relatório não disponível")
+                    
+                    # Botões de controle após consulta
+                    st.markdown("---")
+                    col_b1, col_b2, col_b3 = st.columns(3)
+                    
+                    with col_b1:
+                        if st.button("🔄 Refazer Consulta", type="secondary", use_container_width=True):
+                            st.session_state.consulta_concluida = False
+                            st.session_state.consulta_em_andamento = False
+                            st.session_state.relatorios_baixados = {}
+                            st.session_state.dados_processados = {}
+                            st.rerun()
+                    
+                    with col_b2:
+                        if st.button("⚙️ Alterar Configuração", type="secondary", use_container_width=True):
+                            st.session_state.selected_periodos = {}
+                            st.session_state.selected_cursos = []
+                            st.session_state.consulta_concluida = False
+                            st.session_state.consulta_em_andamento = False
+                            st.session_state.relatorios_baixados = {}
+                            st.session_state.dados_processados = {}
+                            st.session_state.etapa_atual = 2
+                            st.rerun()
+                    
+                    with col_b3:
+                        if sucesso > 0:
+                            if st.button("🚀 Avançar para Processamento", type="primary", use_container_width=True):
+                                st.session_state.etapa_atual = 4
+                                st.success("Pronto para Etapa 4 - Processamento dos Dados!")
+                                st.rerun()
+                        else:
+                            st.button("🚀 Avançar para Processamento", disabled=True, use_container_width=True)
+            
+            # Se consulta já foi concluída anteriormente
+            elif st.session_state.consulta_concluida and st.session_state.relatorios_baixados:
+                st.markdown("### 📊 Consulta Concluída Anteriormente")
+                
+                # Mostrar resumo dos dados já coletados
+                total_registros = 0
+                sucesso = 0
+                for curso, data in st.session_state.relatorios_baixados.items():
+                    if data['status'] == 'sucesso':
+                        sucesso += 1
+                        if 'df' in data and data['df'] is not None:
+                            total_registros += len(data['df'])
+                
+                st.info(f"✅ {sucesso} curso(s) com dados coletados")
+                st.info(f"📊 Total de registros: {total_registros:,}")
+                
+                # Botão para ver detalhes
+                if st.button("🔍 Ver Detalhes dos Relatórios", type="secondary", use_container_width=True):
+                    st.session_state.mostrar_detalhes_consulta = True
+                
+                if st.button("🚀 Continuar para Processamento", type="primary", use_container_width=True):
+                    st.session_state.etapa_atual = 4
+                    st.rerun()
+                
+                if st.button("🔄 Refazer Consulta", type="secondary", use_container_width=True):
+                    st.session_state.consulta_concluida = False
+                    st.session_state.relatorios_baixados = {}
+                    st.session_state.dados_processados = {}
+                    st.rerun()
+                
+                # Mostrar detalhes se solicitado
+                if st.session_state.get('mostrar_detalhes_consulta', False):
+                    st.markdown("#### 📋 Detalhes por Curso")
+                    
+                    for curso in st.session_state.selected_cursos:
+                        curso_nome = curso['nome']
+                        
+                        if curso_nome in st.session_state.relatorios_baixados:
+                            dados = st.session_state.relatorios_baixados[curso_nome]
+                            
+                            with st.expander(f"{'✅' if dados['status'] == 'sucesso' else '❌'} {curso_nome}", expanded=False):
+                                if dados['status'] == 'sucesso':
+                                    st.success("✅ Relatório baixado com sucesso")
+                                    
+                                    if 'df' in dados and dados['df'] is not None:
+                                        df = dados['df']
+                                        st.markdown(f"**Total de registros:** {len(df):,}")
+                                        st.dataframe(df.head(), use_container_width=True)
     
     # Etapa 4 - Processamento dos Dados
     elif etapa_atual >= 4:
