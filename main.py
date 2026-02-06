@@ -46,8 +46,10 @@ def inicializar_estado():
         'dados_consolidados': None,
         'planilha_gerada': False,
         'caminho_planilha': '',
-        'interface_progresso': None,
-        'geracao_em_andamento': False
+        'geracao_em_andamento': False,
+        'progress_bar': None,
+        'status_text': None,
+        'tabela_resultados': []
     }
     
     for key, value in estados_padrao.items():
@@ -326,7 +328,6 @@ else:
             with col1:
                 if st.button("🚀 Iniciar Geração de Relatórios", type="primary", use_container_width=True):
                     st.session_state.geracao_em_andamento = True
-                    st.session_state.interface_progresso = InterfaceProgresso()
                     logger.info(f"Iniciando geração de {total_relatorios} relatórios")
                     st.rerun()
             
@@ -337,16 +338,62 @@ else:
         
         # Se geração em andamento
         if st.session_state.geracao_em_andamento:
-            # Inicializar interface de progresso
-            if not st.session_state.interface_progresso:
-                st.session_state.interface_progresso = InterfaceProgresso()
+            # Criar os elementos de UI diretamente no contexto do Streamlit
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            resultados_container = st.container()
             
-            interface = st.session_state.interface_progresso
-            interface.inicializar(total_relatorios)
+            # Criar colunas para contadores
+            col_status, col_sucesso, col_erro = st.columns(3)
+            with col_status:
+                st.markdown("**Status**")
+                status_counter = st.empty()
+            with col_sucesso:
+                st.markdown("**✅ Sucesso**")
+                sucesso_counter = st.empty()
+            with col_erro:
+                st.markdown("**❌ Erro**")
+                erro_counter = st.empty()
+            
+            # Inicializar contadores
+            status_counter.markdown("**Total:** 0")
+            sucesso_counter.markdown("**✅ 0**")
+            erro_counter.markdown("**❌ 0**")
+            
+            # Inicializar lista de resultados
+            tabela_resultados = []
             
             # Função de callback para progresso
             def callback_progresso(mensagem, progresso):
-                interface.atualizar(mensagem, progresso)
+                progress_bar.progress(progresso / 100)
+                status_text.text(mensagem)
+            
+            # Função para adicionar resultado
+            def adicionar_resultado(curso, periodo, sucesso, mensagem=None):
+                periodo_display = f"{periodo[:4]}/{periodo[4:]}" if len(periodo) == 5 else periodo
+                
+                if sucesso:
+                    emoji = "✅"
+                    status = "Sucesso"
+                else:
+                    emoji = "❌"
+                    status = "Erro"
+                
+                tabela_resultados.append({
+                    'Curso': curso,
+                    'Período': periodo_display,
+                    'Status': f"{emoji} {status}",
+                    'Detalhe': mensagem or ''
+                })
+                
+                # Atualizar contadores
+                sucessos = sum(1 for r in tabela_resultados if '✅' in r['Status'])
+                erros = sum(1 for r in tabela_resultados if '❌' in r['Status'])
+                total = len(tabela_resultados)
+                
+                status_counter.markdown(f"**Total:** {total}")
+                sucesso_counter.markdown(f"**✅ {sucessos}**")
+                erro_counter.markdown(f"**❌ {erros}**")
             
             # Gerar relatórios
             gerador = GeradorRelatoriosOtimizado(st.session_state.authenticator.session)
@@ -388,7 +435,7 @@ else:
                     # Atualizar interface
                     if resultado.get('success'):
                         sucessos += 1
-                        interface.adicionar_resultado(
+                        adicionar_resultado(
                             curso_nome,
                             periodo,
                             True,
@@ -396,7 +443,7 @@ else:
                         )
                     else:
                         erros += 1
-                        interface.adicionar_resultado(
+                        adicionar_resultado(
                             curso_nome,
                             periodo,
                             False,
@@ -414,11 +461,15 @@ else:
             logger.info(f"Geração concluída: {sucessos} sucessos, {erros} erros")
             
             # Exibir resumo
-            interface.atualizar("✅ Geração concluída!", 100)
+            callback_progresso("✅ Geração concluída!", 100)
             time.sleep(2)
             
             # Mostrar tabela de resultados
-            interface.exibir_tabela_resultados()
+            with resultados_container:
+                if tabela_resultados:
+                    st.markdown("### 📋 Resultados Detalhados")
+                    df = pd.DataFrame(tabela_resultados)
+                    st.dataframe(df, use_container_width=True, hide_index=True)
             
             # Botão para continuar
             if st.button("📊 Processar Dados e Gerar Estatísticas", type="primary", use_container_width=True):
