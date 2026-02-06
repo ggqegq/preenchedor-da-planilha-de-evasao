@@ -1,16 +1,18 @@
-# gerador_relatorios.py
+# gerador_relatorios_otimizado.py
 """
-gerador_relatorios.py - Módulo para geração automatizada de relatórios
+gerador_relatorios_otimizado.py - Módulo otimizado para geração de relatórios
 """
 import logging
 import time
 import os
+import json
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 import re
+import threading
 
 from config import *
 from formulario_handler import FormularioHandler
@@ -19,82 +21,19 @@ from utils import *
 
 logger = logging.getLogger(__name__)
 
-class GeradorRelatorios:
-    """Classe para gerar relatórios em lote para múltiplos cursos e períodos"""
+class GeradorRelatoriosOtimizado:
+    """Classe otimizada para gerar relatórios em lote"""
     
     def __init__(self, session):
         self.session = session
         self.form_handler = FormularioHandler(session)
         self.rel_automator = RelatorioUFFAutomator(session)
-        self.resultados = {}
-    
-    def obter_desdobramentos_curso(self, curso_id, localidade_id='1'):
-        """Obtém os desdobramentos disponíveis para um curso"""
-        try:
-            url = f"{APLICACAO_URL}/relatorios/listagens_alunos"
-            response = self.session.get(url, timeout=TIMEOUT_REQUESTS)
-            
-            # Primeiro, obter cursos disponíveis para a localidade
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Construir dados para buscar desdobramentos via AJAX
-            dados_curso = {
-                'authenticity_token': self._extrair_csrf_token(soup),
-                'idlocalidade': localidade_id,
-                'idcurso': curso_id
-            }
-            
-            # URL para buscar desdobramentos (via análise do JavaScript)
-            url_desdobramentos = f"{APLICACAO_URL}/relatorios/buscar_desdobramentos"
-            
-            headers = {
-                'X-Requested-With': 'XMLHttpRequest',
-                'Accept': 'application/json, text/javascript, */*; q=0.01',
-                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
-            }
-            
-            response = self.session.post(
-                url_desdobramentos,
-                data=dados_curso,
-                headers=headers,
-                timeout=TIMEOUT_REQUESTS
-            )
-            
-            if response.status_code == 200:
-                try:
-                    dados = response.json()
-                    if dados.get('success'):
-                        return dados.get('desdobramentos', [])
-                except:
-                    # Se não for JSON, tentar parsear HTML
-                    soup_desdob = BeautifulSoup(response.text, 'html.parser')
-                    options = soup_desdob.find_all('option')
-                    desdobramentos = []
-                    for option in options:
-                        if option.get('value') and option.get('value') != '':
-                            desdobramentos.append({
-                                'value': option.get('value'),
-                                'text': option.get_text(strip=True)
-                            })
-                    return desdobramentos
-            
-            return []
-            
-        except Exception as e:
-            logger.error(f"Erro ao obter desdobramentos: {str(e)}")
-            return []
-    
-    def _extrair_csrf_token(self, soup):
-        """Extrai token CSRF da página"""
-        token_input = soup.find('input', {'name': 'authenticity_token'})
-        if token_input:
-            return token_input.get('value', '')
-        
-        meta_token = soup.find('meta', {'name': 'csrf-token'})
-        if meta_token:
-            return meta_token.get('content', '')
-        
-        return ''
+        self.progresso_atual = {
+            'total': 0,
+            'concluido': 0,
+            'atual': '',
+            'status': ''
+        }
     
     def criar_filtros_para_curso(self, curso_config, periodo, forma_ingresso):
         """Cria dicionário de filtros para um curso específico"""
@@ -105,54 +44,94 @@ class GeradorRelatorios:
             'idturno': '',  # Todos os turnos
             'idstatusaluno': '',  # Todos os status
             'idsituacaoaluno': '',  # Todas as situações
-            'idformaingresso': forma_ingresso,
-            'idacaoafirmativa': '',  # Todas as modalidades
+            'idformaingresso': forma_ingresso,  # SISU 1ª ou 2ª Edição
+            'idacaoafirmativa': '',  # TODAS as modalidades (Ampla + Ações Afirmativas)
             'anosem_ingresso': periodo,
             'anosem_desvinculacao': '',  # Não filtrar por desvinculação
             'format': 'xls'  # Formato XLSX
         }
         return filtros
     
-    def gerar_relatorio_individual(self, curso_config, periodo, forma_ingresso):
-        """Gera um relatório individual para curso/período específico"""
+    def gerar_relatorio_individual_com_progresso(self, curso_config, periodo, forma_ingresso, callback_progresso=None):
+        """Gera um relatório individual com feedback de progresso"""
         logger.info(f"Gerando relatório: {curso_config['nome']} - Período {periodo}")
         
         try:
+            # Atualizar status
+            if callback_progresso:
+                callback_progresso(f"Preparando {curso_config['nome']} - {periodo[:4]}/{periodo[4:]}", 0)
+            
             # Criar filtros
             filtros = self.criar_filtros_para_curso(curso_config, periodo, forma_ingresso)
+            
+            if callback_progresso:
+                callback_progresso(f"Enviando solicitação...", 10)
             
             # Gerar relatório usando FormularioHandler
             resultado = self.form_handler.gerar_relatorio(filtros)
             
-            if resultado.get('success') and resultado.get('relatorio_id'):
-                relatorio_id = resultado['relatorio_id']
-                
-                # Monitorar processamento
-                status_info = self.rel_automator.aguardar_conclusao(
-                    relatorio_id=relatorio_id,
-                    callback_progresso=self._callback_progresso,
-                    timeout=1800  # 30 minutos
-                )
-                
-                if status_info and status_info.get('status') == 'PRONTO':
-                    # Baixar relatório
-                    caminho_arquivo = self.rel_automator.baixar_relatorio(status_info)
-                    
-                    if caminho_arquivo:
-                        return {
-                            'success': True,
-                            'relatorio_id': relatorio_id,
-                            'caminho_arquivo': caminho_arquivo,
-                            'status_info': status_info,
-                            'curso': curso_config['nome'],
-                            'periodo': periodo
-                        }
+            if not resultado.get('success'):
+                return {
+                    'success': False,
+                    'error': resultado.get('error', 'Erro ao enviar solicitação'),
+                    'curso': curso_config['nome'],
+                    'periodo': periodo
+                }
+            
+            if not resultado.get('relatorio_id'):
+                return {
+                    'success': False,
+                    'error': 'ID do relatório não retornado',
+                    'curso': curso_config['nome'],
+                    'periodo': periodo
+                }
+            
+            relatorio_id = resultado['relatorio_id']
+            
+            if callback_progresso:
+                callback_progresso(f"Aguardando processamento... (ID: {relatorio_id})", 30)
+            
+            # Monitorar processamento com progresso detalhado
+            status_info = self._aguardar_conclusao_com_progresso(
+                relatorio_id=relatorio_id,
+                callback_progresso=callback_progresso,
+                progresso_inicial=30,
+                progresso_final=80
+            )
+            
+            if not status_info or status_info.get('status') != 'PRONTO':
+                return {
+                    'success': False,
+                    'error': 'Relatório não ficou pronto',
+                    'curso': curso_config['nome'],
+                    'periodo': periodo
+                }
+            
+            if callback_progresso:
+                callback_progresso(f"Baixando arquivo...", 80)
+            
+            # Baixar relatório
+            caminho_arquivo = self.rel_automator.baixar_relatorio(status_info)
+            
+            if not caminho_arquivo:
+                return {
+                    'success': False,
+                    'error': 'Erro ao baixar arquivo',
+                    'curso': curso_config['nome'],
+                    'periodo': periodo
+                }
+            
+            if callback_progresso:
+                callback_progresso(f"Concluído!", 100)
             
             return {
-                'success': False,
-                'error': resultado.get('error', 'Erro desconhecido'),
+                'success': True,
+                'relatorio_id': relatorio_id,
+                'caminho_arquivo': caminho_arquivo,
+                'status_info': status_info,
                 'curso': curso_config['nome'],
-                'periodo': periodo
+                'periodo': periodo,
+                'forma_ingresso': forma_ingresso
             }
             
         except Exception as e:
@@ -164,34 +143,71 @@ class GeradorRelatorios:
                 'periodo': periodo
             }
     
-    def _callback_progresso(self, progresso, mensagem, concluido):
-        """Callback para atualização de progresso"""
-        logger.info(f"Progresso: {progresso:.1%} - {mensagem}")
-    
-    def gerar_relatorios_em_lote(self, cursos, periodos):
-        """Gera relatórios para todos os cursos e períodos especificados"""
-        logger.info(f"Iniciando geração em lote: {len(cursos)} cursos × {len(periodos)} períodos")
+    def _aguardar_conclusao_com_progresso(self, relatorio_id, callback_progresso=None, 
+                                         progresso_inicial=0, progresso_final=100,
+                                         intervalo=30, timeout=1800):
+        """Aguarda conclusão com feedback de progresso incremental"""
         
-        resultados = {}
+        tempo_inicio = time.time()
+        ultimo_status = None
+        progresso_atual = progresso_inicial
         
-        for curso in cursos:
-            resultados_curso = []
+        while time.time() - tempo_inicio < timeout:
+            status_info = self.rel_automator.verificar_status_relatorio(relatorio_id)
             
-            for periodo in periodos:
-                # Determinar forma de ingresso baseada no semestre
-                forma_ingresso = self._determinar_forma_ingresso(periodo)
-                
-                # Gerar relatório
-                resultado = self.gerar_relatorio_individual(curso, periodo, forma_ingresso)
-                resultados_curso.append(resultado)
-                
-                # Aguardar entre requisições para não sobrecarregar o servidor
-                time.sleep(5)
+            if not status_info:
+                if callback_progresso:
+                    callback_progresso(f"Erro ao verificar status", progresso_atual)
+                time.sleep(intervalo)
+                continue
             
-            resultados[curso['nome']] = resultados_curso
+            # Calcular progresso baseado no tempo
+            tempo_decorrido = time.time() - tempo_inicio
+            progresso_tempo = min(tempo_decorrido / timeout, 0.95)
+            
+            # Combinar progresso do tempo com progresso baseado em etapas
+            if status_info.get('etapas'):
+                etapas = status_info['etapas']
+                num_etapas = len(etapas)
+                etapas_concluidas = sum(1 for etapa in etapas if 'Concluída' in etapa)
+                
+                if num_etapas > 0:
+                    progresso_etapas = etapas_concluidas / num_etapas
+                    progresso_combinado = (progresso_tempo * 0.5) + (progresso_etapas * 0.5)
+                else:
+                    progresso_combinado = progresso_tempo
+            else:
+                progresso_combinado = progresso_tempo
+            
+            # Calcular progresso final
+            range_progresso = progresso_final - progresso_inicial
+            progresso_atual = progresso_inicial + (progresso_combinado * range_progresso)
+            
+            # Mensagem de status
+            status = status_info.get('status', 'Desconhecido')
+            mensagem = f"Status: {status}"
+            
+            if status_info.get('etapas'):
+                ultima_etapa = status_info['etapas'][-1] if status_info['etapas'] else ''
+                mensagem += f" | {ultima_etapa[:50]}"
+            
+            # Chamar callback de progresso
+            if callback_progresso:
+                callback_progresso(mensagem, progresso_atual)
+            
+            # Verificar se está pronto
+            if status_info['status'] == 'PRONTO':
+                return status_info
+            
+            # Verificar se houve mudança significativa
+            if status_info != ultimo_status:
+                logger.info(f"Status atualizado: {status_info['status']}")
+                ultimo_status = status_info
+            
+            time.sleep(intervalo)
         
-        self.resultados = resultados
-        return resultados
+        # Timeout atingido
+        return None
     
     def _determinar_forma_ingresso(self, periodo):
         """Determina a forma de ingresso baseada no semestre do período"""
@@ -229,9 +245,9 @@ class GeradorRelatorios:
         
         return periodos
     
-    def obter_cursos_predefinidos(self):
+    def obter_cursos_predefinidos(self, cursos_selecionados=None):
         """Retorna configuração dos cursos predefinidos"""
-        return [
+        todos_cursos = [
             {
                 'nome': 'Química (Licenciatura)',
                 'codigo_curso': '12700',  # Código do curso Química
@@ -251,101 +267,147 @@ class GeradorRelatorios:
                 'tipo': 'Bacharelado'
             }
         ]
+        
+        if cursos_selecionados:
+            return [c for c in todos_cursos if c['nome'] in cursos_selecionados]
+        
+        return todos_cursos
 
 
-class ProcessadorDadosRelatorios:
-    """Classe para processar e analisar dados dos relatórios baixados"""
+class ProcessadorDadosOtimizado:
+    """Classe otimizada para processar dados dos relatórios"""
     
     def __init__(self, pasta_relatorios=PASTA_RELATORIOS):
         self.pasta_relatorios = pasta_relatorios
     
-    def ler_relatorio_excel(self, caminho_arquivo):
-        """Lê um arquivo Excel e retorna DataFrame"""
+    def ler_e_processar_relatorio(self, caminho_arquivo, curso, periodo):
+        """Lê e processa um relatório em um único passo"""
         try:
+            # Ler Excel
             df = pd.read_excel(caminho_arquivo)
-            logger.info(f"Arquivo lido: {len(df)} linhas, {len(df.columns)} colunas")
-            return df
-        except Exception as e:
-            logger.error(f"Erro ao ler arquivo Excel: {str(e)}")
-            return None
-    
-    def extrair_dados_relatorio(self, df, curso, periodo):
-        """Extrai e processa dados do relatório"""
-        if df is None or df.empty:
-            return None
-        
-        dados = {
-            'curso': curso,
-            'periodo': periodo,
-            'total_registros': len(df),
-            'categorias': {}
-        }
-        
-        # Mapeamento de situações
-        situacoes_normalizadas = {
-            'Inscrito': 'Inscritos/Pendentes/Concluintes',
-            'Concluinte': 'Inscritos/Pendentes/Concluintes',
-            'Pendente': 'Inscritos/Pendentes/Concluintes',
-            'Trancado': 'Trancados',
-            'Formando': 'Formados',
-            'Formado': 'Formados',
-            'Permanência de Vínculo': 'Formados'
-        }
-        
-        # Classificar por situação
-        if 'SITUAÇÃO' in df.columns:
-            situacoes = df['SITUAÇÃO'].fillna('Desconhecido')
             
-            for situacao_original, situacao_normalizada in situacoes_normalizadas.items():
-                contagem = situacoes[situacoes.str.contains(situacao_original, case=False, na=False)].shape[0]
-                if contagem > 0:
-                    if situacao_normalizada not in dados['categorias']:
-                        dados['categorias'][situacao_normalizada] = 0
-                    dados['categorias'][situacao_normalizada] += contagem
-        
-        # Contar cancelamentos
-        if 'MOTIVO DO CANCELAMENTO' in df.columns:
-            motivos = df['MOTIVO DO CANCELAMENTO'].fillna('')
-            cancelamentos = motivos[motivos != '']
-            dados['total_cancelamentos'] = len(cancelamentos)
+            if df.empty:
+                return None
             
-            # Classificar motivos de cancelamento
-            motivos_classificados = self._classificar_motivos_cancelamento(cancelamentos)
-            dados['motivos_cancelamento'] = motivos_classificados
-        
-        # Separar por modalidade de ingresso
-        if 'MODALIDADE' in df.columns:
-            modalidades = df['MODALIDADE'].fillna('')
+            # Normalizar nomes de colunas (remover espaços, maiúsculas)
+            df.columns = [str(col).strip().upper() for col in df.columns]
             
-            # Ampla concorrência (códigos começando com A)
-            ampla_concorrencia = modalidades[modalidades.str.startswith('A', na=False)]
-            dados['ampla_concorrencia'] = len(ampla_concorrencia)
+            dados = {
+                'curso': curso,
+                'periodo': periodo,
+                'total_registros': len(df),
+                'detalhes': {}
+            }
             
-            # Ações afirmativas (códigos começando com L)
-            acoes_afirmativas = modalidades[modalidades.str.startswith('L', na=False)]
-            dados['acoes_afirmativas'] = len(acoes_afirmativas)
-        
-        # Calcular matrículas ativas
-        mat_ativas = 0
-        for cat in ['Inscritos/Pendentes/Concluintes', 'Trancados']:
-            if cat in dados['categorias']:
-                mat_ativas += dados['categorias'][cat]
-        
-        dados['matriculas_ativas'] = mat_ativas
-        
-        # Calcular percentuais
-        if dados['total_registros'] > 0:
-            for categoria, valor in dados['categorias'].items():
-                percentual = (valor / dados['total_registros']) * 100
-                dados['categorias'][categoria] = {
-                    'quantidade': valor,
-                    'percentual': round(percentual, 2)
+            # 1. Contar por SITUAÇÃO
+            if 'SITUAÇÃO' in df.columns or 'SITUACAO' in df.columns:
+                col_situacao = 'SITUAÇÃO' if 'SITUAÇÃO' in df.columns else 'SITUACAO'
+                
+                situacoes = df[col_situacao].fillna('Desconhecido').astype(str)
+                
+                # Mapear para categorias normalizadas
+                categorias = {
+                    'Inscritos/Pendentes/Concluintes': 0,
+                    'Trancados': 0,
+                    'Formados': 0,
+                    'Outros': 0
                 }
-        
-        return dados
+                
+                for situacao in situacoes:
+                    situacao_lower = situacao.lower()
+                    
+                    if any(term in situacao_lower for term in ['inscrito', 'concluinte', 'pendente']):
+                        categorias['Inscritos/Pendentes/Concluintes'] += 1
+                    elif 'trancado' in situacao_lower:
+                        categorias['Trancados'] += 1
+                    elif any(term in situacao_lower for term in ['formado', 'formando', 'permanência']):
+                        categorias['Formados'] += 1
+                    else:
+                        categorias['Outros'] += 1
+                
+                dados['categorias_situacao'] = categorias
+            
+            # 2. Contar cancelamentos
+            col_cancelamento = None
+            for col in ['MOTIVO DO CANCELAMENTO', 'MOTIVO CANCELAMENTO', 'CANCELAMENTO']:
+                if col in df.columns:
+                    col_cancelamento = col
+                    break
+            
+            if col_cancelamento:
+                motivos = df[col_cancelamento].fillna('')
+                cancelamentos = motivos[motivos != '']
+                dados['total_cancelamentos'] = len(cancelamentos)
+                dados['motivos_cancelamento'] = self._classificar_motivos_cancelamento(cancelamentos)
+            else:
+                dados['total_cancelamentos'] = 0
+                dados['motivos_cancelamento'] = {}
+            
+            # 3. Separar por modalidade
+            col_modalidade = None
+            for col in ['MODALIDADE', 'MODALIDADE DE INGRESSO', 'ACAO AFIRMATIVA']:
+                if col in df.columns:
+                    col_modalidade = col
+                    break
+            
+            if col_modalidade:
+                modalidades = df[col_modalidade].fillna('')
+                
+                # Ampla concorrência (códigos começando com A)
+                ampla = modalidades[modalidades.str.startswith('A', na=False)]
+                dados['ampla_concorrencia'] = len(ampla)
+                
+                # Ações afirmativas (códigos começando com L)
+                acoes = modalidades[modalidades.str.startswith('L', na=False)]
+                dados['acoes_afirmativas'] = len(acoes)
+                
+                # Outras modalidades
+                outras = modalidades[~(modalidades.str.startswith('A', na=False) | 
+                                       modalidades.str.startswith('L', na=False)) & (modalidades != '')]
+                dados['outras_modalidades'] = len(outras)
+            else:
+                dados['ampla_concorrencia'] = 0
+                dados['acoes_afirmativas'] = 0
+                dados['outras_modalidades'] = 0
+            
+            # 4. Calcular totais e percentuais
+            dados['matriculas_ativas'] = (
+                dados['categorias_situacao'].get('Inscritos/Pendentes/Concluintes', 0) +
+                dados['categorias_situacao'].get('Trancados', 0)
+            )
+            
+            # Calcular percentuais
+            if dados['total_registros'] > 0:
+                for categoria in dados['categorias_situacao']:
+                    valor = dados['categorias_situacao'][categoria]
+                    percentual = (valor / dados['total_registros']) * 100
+                    dados['categorias_situacao'][categoria] = {
+                        'quantidade': valor,
+                        'percentual': round(percentual, 2)
+                    }
+                
+                # Percentual cancelamentos
+                dados['percentual_cancelamentos'] = round(
+                    (dados['total_cancelamentos'] / dados['total_registros']) * 100, 2
+                )
+                
+                # Percentual modalidades
+                dados['percentual_ampla'] = round(
+                    (dados['ampla_concorrencia'] / dados['total_registros']) * 100, 2
+                ) if dados['total_registros'] > 0 else 0
+                
+                dados['percentual_acoes'] = round(
+                    (dados['acoes_afirmativas'] / dados['total_registros']) * 100, 2
+                ) if dados['total_registros'] > 0 else 0
+            
+            return dados
+            
+        except Exception as e:
+            logger.error(f"Erro ao processar relatório {caminho_arquivo}: {str(e)}")
+            return None
     
     def _classificar_motivos_cancelamento(self, motivos_series):
-        """Classifica motivos de cancelamento em categorias"""
+        """Classifica motivos de cancelamento"""
         categorias = {
             'Solicitação Oficial': 0,
             'Abandono': 0,
@@ -355,50 +417,42 @@ class ProcessadorDadosRelatorios:
             'Outros': 0
         }
         
-        # Mapeamento de padrões para categorias
-        padroes = {
-            'Solicitação Oficial': ['solicitação oficial', 'pedido'],
-            'Abandono': ['abandono', 'desistência'],
-            'Insuficiência de Aproveitamento': ['insuficiência de aproveitamento', 'reprovação'],
-            'Ingressante - Insuf. Aproveit.': ['ingressante', 'calouro'],
-            'Mudança de Curso': ['mudança de curso', 'transferência']
-        }
-        
         for motivo in motivos_series:
             motivo_str = str(motivo).lower()
-            classificado = False
             
-            for categoria, padroes_cat in padroes.items():
-                for padrao in padroes_cat:
-                    if padrao in motivo_str:
-                        categorias[categoria] += 1
-                        classificado = True
-                        break
-                if classificado:
-                    break
-            
-            if not classificado:
+            if any(term in motivo_str for term in ['solicitação', 'solicitacao', 'pedido', 'oficial']):
+                categorias['Solicitação Oficial'] += 1
+            elif any(term in motivo_str for term in ['abandono', 'desistência', 'desistencia']):
+                categorias['Abandono'] += 1
+            elif any(term in motivo_str for term in ['insuficiência', 'insuficiencia', 'reprovação', 'reprovacao']):
+                if 'ingressante' in motivo_str or 'calouro' in motivo_str:
+                    categorias['Ingressante - Insuf. Aproveit.'] += 1
+                else:
+                    categorias['Insuficiência de Aproveitamento'] += 1
+            elif any(term in motivo_str for term in ['mudança', 'mudanca', 'transferência', 'transferencia']):
+                categorias['Mudança de Curso'] += 1
+            else:
                 categorias['Outros'] += 1
         
-        # Calcular percentuais
+        # Converter para dicionário com percentuais
         total = sum(categorias.values())
         if total > 0:
-            categorias_com_percentuais = {}
+            resultado = {}
             for cat, valor in categorias.items():
                 percentual = (valor / total) * 100
-                categorias_com_percentuais[cat] = {
+                resultado[cat] = {
                     'quantidade': valor,
                     'percentual': round(percentual, 2)
                 }
-            return categorias_com_percentuais
+            return resultado
         
         return categorias
     
-    def consolidar_dados_todos_relatorios(self, resultados_geracao):
-        """Consolida dados de todos os relatórios gerados"""
+    def processar_todos_relatorios(self, resultados_geracao):
+        """Processa todos os relatórios e consolida dados"""
         dados_consolidados = {
-            'cursos': {},
-            'periodos': {},
+            'por_curso': {},
+            'por_periodo': {},
             'resumo_geral': {
                 'total_cursos': 0,
                 'total_periodos': 0,
@@ -409,218 +463,129 @@ class ProcessadorDadosRelatorios:
             }
         }
         
+        periodos_unicos = set()
+        
         for curso_nome, resultados_curso in resultados_geracao.items():
-            dados_curso = {
-                'periodos': {},
-                'totais': {
-                    'matriculas': 0,
-                    'cancelamentos': 0,
-                    'formados': 0,
-                    'ativos': 0
+            if curso_nome not in dados_consolidados['por_curso']:
+                dados_consolidados['por_curso'][curso_nome] = {
+                    'periodos': {},
+                    'totais': {
+                        'matriculas': 0,
+                        'cancelamentos': 0,
+                        'formados': 0,
+                        'ativos': 0,
+                        'ampla_concorrencia': 0,
+                        'acoes_afirmativas': 0
+                    }
                 }
-            }
             
             for resultado in resultados_curso:
                 if resultado.get('success') and 'caminho_arquivo' in resultado:
                     periodo = resultado.get('periodo')
+                    periodos_unicos.add(periodo)
                     
-                    # Ler e processar relatório
-                    df = self.ler_relatorio_excel(resultado['caminho_arquivo'])
-                    if df is not None:
-                        dados_periodo = self.extrair_dados_relatorio(df, curso_nome, periodo)
+                    # Processar relatório
+                    dados = self.ler_e_processar_relatorio(
+                        resultado['caminho_arquivo'],
+                        curso_nome,
+                        periodo
+                    )
+                    
+                    if dados:
+                        dados_consolidados['por_curso'][curso_nome]['periodos'][periodo] = dados
                         
-                        if dados_periodo:
-                            dados_curso['periodos'][periodo] = dados_periodo
-                            
-                            # Acumular totais
-                            dados_curso['totais']['matriculas'] += dados_periodo.get('total_registros', 0)
-                            dados_curso['totais']['cancelamentos'] += dados_periodo.get('total_cancelamentos', 0)
-                            
-                            if 'Formados' in dados_periodo.get('categorias', {}):
-                                dados_curso['totais']['formados'] += dados_periodo['categorias']['Formados'].get('quantidade', 0)
-                            
-                            dados_curso['totais']['ativos'] += dados_periodo.get('matriculas_ativas', 0)
-            
-            dados_consolidados['cursos'][curso_nome] = dados_curso
+                        # Acumular totais do curso
+                        dados_consolidados['por_curso'][curso_nome]['totais']['matriculas'] += dados['total_registros']
+                        dados_consolidados['por_curso'][curso_nome]['totais']['cancelamentos'] += dados['total_cancelamentos']
+                        dados_consolidados['por_curso'][curso_nome]['totais']['formados'] += dados['categorias_situacao']['Formados']['quantidade']
+                        dados_consolidados['por_curso'][curso_nome]['totais']['ativos'] += dados['matriculas_ativas']
+                        dados_consolidados['por_curso'][curso_nome]['totais']['ampla_concorrencia'] += dados['ampla_concorrencia']
+                        dados_consolidados['por_curso'][curso_nome]['totais']['acoes_afirmativas'] += dados['acoes_afirmativas']
         
         # Calcular totais gerais
-        for curso_nome, dados_curso in dados_consolidados['cursos'].items():
-            dados_consolidados['resumo_geral']['total_cursos'] += 1
+        dados_consolidados['resumo_geral']['total_cursos'] = len(dados_consolidados['por_curso'])
+        dados_consolidados['resumo_geral']['total_periodos'] = len(periodos_unicos)
+        
+        for curso_nome, dados_curso in dados_consolidados['por_curso'].items():
             dados_consolidados['resumo_geral']['total_matriculas'] += dados_curso['totais']['matriculas']
             dados_consolidados['resumo_geral']['total_cancelamentos'] += dados_curso['totais']['cancelamentos']
             dados_consolidados['resumo_geral']['total_formados'] += dados_curso['totais']['formados']
             dados_consolidados['resumo_geral']['total_ativos'] += dados_curso['totais']['ativos']
         
-        # Contar períodos únicos
-        periodos_unicos = set()
-        for curso_nome, dados_curso in dados_consolidados['cursos'].items():
-            for periodo in dados_curso['periodos'].keys():
-                periodos_unicos.add(periodo)
-        
-        dados_consolidados['resumo_geral']['total_periodos'] = len(periodos_unicos)
-        
         return dados_consolidados
+
+
+class InterfaceProgresso:
+    """Classe para gerenciar interface de progresso no Streamlit"""
     
-    def gerar_planilha_consolidada(self, dados_consolidados, caminho_saida):
-        """Gera planilha Excel com dados consolidados"""
-        try:
-            # Criar writer para múltiplas abas
-            with pd.ExcelWriter(caminho_saida, engine='xlsxwriter') as writer:
-                workbook = writer.book
-                
-                # 1. ABA: RESUMO GERAL
-                dados_resumo = []
-                for curso_nome, dados_curso in dados_consolidados['cursos'].items():
-                    dados_resumo.append({
-                        'Curso': curso_nome,
-                        'Total Matrículas': dados_curso['totais']['matriculas'],
-                        'Total Cancelamentos': dados_curso['totais']['cancelamentos'],
-                        'Total Formados': dados_curso['totais']['formados'],
-                        'Total Ativos': dados_curso['totais']['ativos'],
-                        '% Cancelamentos': round((dados_curso['totais']['cancelamentos'] / dados_curso['totais']['matriculas'] * 100), 2) if dados_curso['totais']['matriculas'] > 0 else 0,
-                        '% Formados': round((dados_curso['totais']['formados'] / dados_curso['totais']['matriculas'] * 100), 2) if dados_curso['totais']['matriculas'] > 0 else 0,
-                        '% Ativos': round((dados_curso['totais']['ativos'] / dados_curso['totais']['matriculas'] * 100), 2) if dados_curso['totais']['matriculas'] > 0 else 0
-                    })
-                
-                df_resumo = pd.DataFrame(dados_resumo)
-                df_resumo.to_excel(writer, sheet_name='RESUMO GERAL', index=False)
-                
-                # Formatar a aba RESUMO GERAL
-                worksheet = writer.sheets['RESUMO GERAL']
-                format_percent = workbook.add_format({'num_format': '0.00%'})
-                format_header = workbook.add_format({'bold': True, 'bg_color': '#366092', 'font_color': 'white'})
-                
-                for col_num, value in enumerate(df_resumo.columns.values):
-                    worksheet.write(0, col_num, value, format_header)
-                
-                # Aplicar formatação percentual
-                percent_cols = ['% Cancelamentos', '% Formados', '% Ativos']
-                for col_name in percent_cols:
-                    if col_name in df_resumo.columns:
-                        col_idx = df_resumo.columns.get_loc(col_name)
-                        for row in range(1, len(df_resumo) + 1):
-                            worksheet.write(row, col_idx, df_resumo.iloc[row-1][col_name]/100, format_percent)
-                
-                worksheet.autofit()
-                
-                # 2. ABA: DETALHES POR CURSO E PERÍODO
-                dados_detalhes = []
-                for curso_nome, dados_curso in dados_consolidados['cursos'].items():
-                    for periodo, dados_periodo in dados_curso['periodos'].items():
-                        # Formatando período para exibição
-                        periodo_display = f"{periodo[:4]}/{periodo[4:]}"
-                        
-                        linha = {
-                            'Curso': curso_nome,
-                            'Período': periodo_display,
-                            'Total Registros': dados_periodo.get('total_registros', 0),
-                            'Matrículas Ativas': dados_periodo.get('matriculas_ativas', 0),
-                            'Ampla Concorrência': dados_periodo.get('ampla_concorrencia', 0),
-                            'Ações Afirmativas': dados_periodo.get('acoes_afirmativas', 0)
-                        }
-                        
-                        # Adicionar categorias
-                        categorias = dados_periodo.get('categorias', {})
-                        for categoria, dados_cat in categorias.items():
-                            linha[f'{categoria} (qtd)'] = dados_cat.get('quantidade', 0)
-                            linha[f'{categoria} (%)'] = dados_cat.get('percentual', 0)
-                        
-                        # Adicionar cancelamentos
-                        motivos = dados_periodo.get('motivos_cancelamento', {})
-                        for motivo, dados_motivo in motivos.items():
-                            linha[f'Cancel: {motivo}'] = dados_motivo.get('quantidade', 0)
-                        
-                        dados_detalhes.append(linha)
-                
-                if dados_detalhes:
-                    df_detalhes = pd.DataFrame(dados_detalhes)
-                    df_detalhes.to_excel(writer, sheet_name='DETALHES', index=False)
-                    
-                    # Formatar a aba DETALHES
-                    worksheet_detalhes = writer.sheets['DETALHES']
-                    for col_num, value in enumerate(df_detalhes.columns.values):
-                        worksheet_detalhes.write(0, col_num, value, format_header)
-                    
-                    # Aplicar formatação percentual para colunas com %
-                    for col_num, col_name in enumerate(df_detalhes.columns):
-                        if '(%)' in col_name:
-                            for row in range(1, len(df_detalhes) + 1):
-                                worksheet_detalhes.write(row, col_num, df_detalhes.iloc[row-1][col_name]/100, format_percent)
-                    
-                    worksheet_detalhes.autofit()
-                
-                # 3. ABA: CANCELAMENTOS
-                dados_cancel = []
-                for curso_nome, dados_curso in dados_consolidados['cursos'].items():
-                    for periodo, dados_periodo in dados_curso['periodos'].items():
-                        periodo_display = f"{periodo[:4]}/{periodo[4:]}"
-                        motivos = dados_periodo.get('motivos_cancelamento', {})
-                        
-                        for motivo, dados_motivo in motivos.items():
-                            dados_cancel.append({
-                                'Curso': curso_nome,
-                                'Período': periodo_display,
-                                'Motivo Cancelamento': motivo,
-                                'Quantidade': dados_motivo.get('quantidade', 0),
-                                'Percentual': dados_motivo.get('percentual', 0)
-                            })
-                
-                if dados_cancel:
-                    df_cancel = pd.DataFrame(dados_cancel)
-                    df_cancel.to_excel(writer, sheet_name='CANCELAMENTOS', index=False)
-                    
-                    # Formatar a aba CANCELAMENTOS
-                    worksheet_cancel = writer.sheets['CANCELAMENTOS']
-                    for col_num, value in enumerate(df_cancel.columns.values):
-                        worksheet_cancel.write(0, col_num, value, format_header)
-                    
-                    col_percent = df_cancel.columns.get_loc('Percentual')
-                    for row in range(1, len(df_cancel) + 1):
-                        worksheet_cancel.write(row, col_percent, df_cancel.iloc[row-1]['Percentual']/100, format_percent)
-                    
-                    worksheet_cancel.autofit()
-                
-                # 4. ABA: MODALIDADES
-                dados_modalidades = []
-                for curso_nome, dados_curso in dados_consolidados['cursos'].items():
-                    for periodo, dados_periodo in dados_curso['periodos'].items():
-                        periodo_display = f"{periodo[:4]}/{periodo[4:]}"
-                        total = dados_periodo.get('total_registros', 0)
-                        ampla = dados_periodo.get('ampla_concorrencia', 0)
-                        acoes = dados_periodo.get('acoes_afirmativas', 0)
-                        
-                        if total > 0:
-                            dados_modalidades.append({
-                                'Curso': curso_nome,
-                                'Período': periodo_display,
-                                'Total': total,
-                                'Ampla Concorrência': ampla,
-                                '% Ampla': round((ampla / total * 100), 2),
-                                'Ações Afirmativas': acoes,
-                                '% Ações': round((acoes / total * 100), 2)
-                            })
-                
-                if dados_modalidades:
-                    df_modal = pd.DataFrame(dados_modalidades)
-                    df_modal.to_excel(writer, sheet_name='MODALIDADES', index=False)
-                    
-                    # Formatar a aba MODALIDADES
-                    worksheet_modal = writer.sheets['MODALIDADES']
-                    for col_num, value in enumerate(df_modal.columns.values):
-                        worksheet_modal.write(0, col_num, value, format_header)
-                    
-                    # Formatar percentuais
-                    for col_name in ['% Ampla', '% Ações']:
-                        if col_name in df_modal.columns:
-                            col_idx = df_modal.columns.get_loc(col_name)
-                            for row in range(1, len(df_modal) + 1):
-                                worksheet_modal.write(row, col_idx, df_modal.iloc[row-1][col_name]/100, format_percent)
-                    
-                    worksheet_modal.autofit()
-                
-                logger.info(f"Planilha consolidada gerada: {caminho_saida}")
-                return True
-                
-        except Exception as e:
-            logger.error(f"Erro ao gerar planilha: {str(e)}")
-            return False
+    def __init__(self):
+        self.progress_bar = None
+        self.status_text = None
+        self.resultados_container = None
+        self.tabela_resultados = None
+    
+    def inicializar(self, total_tarefas):
+        """Inicializa os elementos da interface"""
+        self.progress_bar = st.progress(0)
+        self.status_text = st.empty()
+        self.resultados_container = st.container()
+        self.tabela_resultados = []
+        
+        # Criar colunas para exibir resultados
+        cols = st.columns(3)
+        self.col_status = cols[0].empty()
+        self.col_sucesso = cols[1].empty()
+        self.col_erro = cols[2].empty()
+        
+        # Inicializar contadores
+        self.col_status.markdown("**Status**")
+        self.col_sucesso.markdown("**✅ Sucesso**")
+        self.col_erro.markdown("**❌ Erro**")
+        
+        self.atualizar_contadores(0, 0, total_tarefas)
+    
+    def atualizar(self, mensagem, progresso):
+        """Atualiza a barra de progresso e mensagem"""
+        if self.progress_bar:
+            self.progress_bar.progress(progresso / 100)
+        if self.status_text:
+            self.status_text.text(mensagem)
+    
+    def adicionar_resultado(self, curso, periodo, sucesso, mensagem=None):
+        """Adiciona um resultado à tabela"""
+        periodo_display = f"{periodo[:4]}/{periodo[4:]}" if len(periodo) == 5 else periodo
+        
+        if sucesso:
+            emoji = "✅"
+            status = "Sucesso"
+        else:
+            emoji = "❌"
+            status = "Erro"
+        
+        self.tabela_resultados.append({
+            'Curso': curso,
+            'Período': periodo_display,
+            'Status': f"{emoji} {status}",
+            'Detalhe': mensagem or ''
+        })
+        
+        # Atualizar contadores
+        sucessos = sum(1 for r in self.tabela_resultados if '✅' in r['Status'])
+        erros = sum(1 for r in self.tabela_resultados if '❌' in r['Status'])
+        total = len(self.tabela_resultados)
+        
+        self.atualizar_contadores(sucessos, erros, total)
+    
+    def atualizar_contadores(self, sucessos, erros, total):
+        """Atualiza os contadores na interface"""
+        self.col_status.markdown(f"**Total:** {total}")
+        self.col_sucesso.markdown(f"**✅ {sucessos}**")
+        self.col_erro.markdown(f"**❌ {erros}**")
+    
+    def exibir_tabela_resultados(self):
+        """Exibe tabela com todos os resultados"""
+        with self.resultados_container:
+            if self.tabela_resultados:
+                st.markdown("### 📋 Resultados Detalhados")
+                df = pd.DataFrame(self.tabela_resultados)
+                st.dataframe(df, use_container_width=True, hide_index=True)
