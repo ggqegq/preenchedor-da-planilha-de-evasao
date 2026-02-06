@@ -276,6 +276,8 @@ else:
                     'final_display': f"{ano_final}/{semestre_final}º"
                 }
                 
+                logger.info(f"Configuração salva: {len(cursos_selecionados)} cursos, período {ano_inicial}{semestre_inicial} a {ano_final}{semestre_final}")
+                
                 st.session_state.etapa_atual = 2
                 st.success("✅ Configuração salva com sucesso!")
                 time.sleep(1)
@@ -325,6 +327,7 @@ else:
                 if st.button("🚀 Iniciar Geração de Relatórios", type="primary", use_container_width=True):
                     st.session_state.geracao_em_andamento = True
                     st.session_state.interface_progresso = InterfaceProgresso()
+                    logger.info(f"Iniciando geração de {total_relatorios} relatórios")
                     st.rerun()
             
             with col2:
@@ -369,6 +372,7 @@ else:
                     
                     # Determinar forma de ingresso
                     forma_ingresso = gerador._determinar_forma_ingresso(periodo)
+                    logger.info(f"Gerando relatório: {curso_nome} - {periodo} - Forma ingresso: {forma_ingresso}")
                     
                     # Gerar relatório
                     resultado = gerador.gerar_relatorio_individual_com_progresso(
@@ -406,6 +410,8 @@ else:
             st.session_state.resultados_geracao = resultados
             st.session_state.consulta_concluida = True
             st.session_state.geracao_em_andamento = False
+            
+            logger.info(f"Geração concluída: {sucessos} sucessos, {erros} erros")
             
             # Exibir resumo
             interface.atualizar("✅ Geração concluída!", 100)
