@@ -1,4 +1,4 @@
-# main_simplificado.py
+# main_otimizado.py
 import streamlit as st
 import os
 import sys
@@ -6,7 +6,6 @@ from datetime import datetime
 import pandas as pd
 import time
 import logging
-import re
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -16,6 +15,11 @@ logger = logging.getLogger(__name__)
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from auth import UFFAuthenticator
+from gerador_relatorios_otimizado import (
+    GeradorRelatoriosOtimizado, 
+    ProcessadorDadosOtimizado,
+    InterfaceProgresso
+)
 
 # Configurações
 PASTA_RELATORIOS = 'relatorios'
@@ -29,472 +33,56 @@ st.set_page_config(
 
 # Estado da sessão
 def inicializar_estado():
-    estados = {
+    """Inicializa o estado da sessão"""
+    estados_padrao = {
         'authenticated': False,
         'authenticator': None,
         'username': '',
         'selected_cursos': [],
         'selected_periodos': {},
         'etapa_atual': 1,
-        'geracao_concluida': False,
-        'resultados': {},
+        'consulta_concluida': False,
+        'resultados_geracao': {},
+        'dados_consolidados': None,
+        'planilha_gerada': False,
+        'caminho_planilha': '',
+        'interface_progresso': None,
         'geracao_em_andamento': False
     }
     
-    for key, value in estados.items():
+    for key, value in estados_padrao.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
 inicializar_estado()
 
-# ================== MÓDULO SIMPLIFICADO DENTRO DO MAIN ==================
-
-class GeradorRelatoriosStreamlit:
-    """Versão simplificada do gerador de relatórios para Streamlit"""
+# Funções auxiliares
+def parse_periodo_texto(periodo_texto):
+    """Extrai ano e semestre de um texto de período"""
+    if not periodo_texto:
+        return None, None
     
-    def __init__(self, session):
-        self.session = session
-        self.base_url = "https://app.uff.br/graduacao/administracaoacademica"
-    
-    def extrair_csrf_token(self, html):
-        """Extrai token CSRF do HTML"""
-        import re
-        from bs4 import BeautifulSoup
-        
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        # Procurar input hidden
-        input_token = soup.find('input', {'name': 'authenticity_token'})
-        if input_token and input_token.get('value'):
-            return input_token.get('value')
-        
-        # Procurar meta tag
-        meta_token = soup.find('meta', {'name': 'csrf-token'})
-        if meta_token and meta_token.get('content'):
-            return meta_token.get('content')
-        
-        return None
-    
-    def carregar_pagina_formulario(self):
-        """Carrega a página do formulário"""
-        url = f"{self.base_url}/relatorios/listagens_alunos"
-        
+    import re
+    match = re.search(r'(\d{4})\s*/\s*(\d+)', periodo_texto)
+    if match:
         try:
-            response = self.session.get(url, timeout=30)
-            response.raise_for_status()
-            return response.text
-        except Exception as e:
-            logger.error(f"Erro ao carregar formulário: {str(e)}")
-            return None
+            ano = int(match.group(1))
+            semestre = int(match.group(2).replace('º', '').replace('°', ''))
+            return ano, semestre
+        except:
+            return None, None
     
-    def criar_parametros(self, curso_nome, periodo):
-        """Cria parâmetros para o formulário"""
-        
-        # Mapeamento baseado no HTML fornecido
-        mapeamento = {
-            'Química (Licenciatura)': {
-                'idcurso': '12700',
-                'iddesdobramento': '12700'
-            },
-            'Química (Bacharelado)': {
-                'idcurso': '12700',
-                'iddesdobramento': '312700'
-            },
-            'Química Industrial': {
-                'idcurso': '12709',
-                'iddesdobramento': '12709'
-            }
-        }
-        
-        # Determinar forma de ingresso baseada no semestre
-        semestre = int(periodo[4])  # Último dígito
-        if semestre == 1:
-            forma_ingresso = '125'  # SISU 1ª Edição
-        else:
-            forma_ingresso = '124'  # SISU 2ª Edição
-        
-        curso_info = mapeamento.get(curso_nome)
-        if not curso_info:
-            raise ValueError(f"Curso não mapeado: {curso_nome}")
-        
-        return {
-            'authenticity_token': '',  # Será preenchido depois
-            'idlocalidade': '1',  # Niterói
-            'idcurso': curso_info['idcurso'],
-            'iddesdobramento': curso_info['iddesdobramento'],
-            'idturno': '',  # Todos
-            'idstatusaluno': '',  # Todos
-            'idsituacaoaluno': '',  # Todas
-            'idformaingresso': forma_ingresso,
-            'idacaoafirmativa': '',  # Todas
-            'anosem_ingresso': periodo,  # Formato: 20251, 20252
-            'anosem_desvinculacao': '',  # Não filtrar
-            'format': 'xls'  # XLSX
-        }
-    
-    def enviar_formulario(self, html_pagina, parametros):
-        """Envia o formulário"""
-        from bs4 import BeautifulSoup
-        import re
-        
-        # Extrair tokens
-        soup = BeautifulSoup(html_pagina, 'html.parser')
-        
-        # Token CSRF
-        csrf_token = self.extrair_csrf_token(html_pagina)
-        if not csrf_token:
-            logger.error("CSRF token não encontrado")
-            return None
-        
-        # Token utf8
-        utf8_input = soup.find('input', {'name': 'utf8'})
-        utf8_value = utf8_input.get('value') if utf8_input else '✓'
-        
-        # Atualizar parâmetros com tokens
-        parametros_completos = parametros.copy()
-        parametros_completos['authenticity_token'] = csrf_token
-        parametros_completos['utf8'] = utf8_value
-        
-        # Enviar requisição
-        url = f"{self.base_url}/relatorios/listagens_alunos"
-        
-        headers = {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Referer': url
-        }
-        
-        try:
-            response = self.session.post(
-                url,
-                data=parametros_completos,
-                headers=headers,
-                allow_redirects=True,
-                timeout=30
-            )
-            
-            response.raise_for_status()
-            
-            # Verificar se foi redirecionado para página de relatório
-            if '/relatorios/' in response.url:
-                match = re.search(r'/relatorios/(\d+)', response.url)
-                if match:
-                    return {
-                        'success': True,
-                        'relatorio_id': match.group(1),
-                        'url': response.url
-                    }
-            
-            return {
-                'success': False,
-                'error': 'Não redirecionado para página de relatório'
-            }
-            
-        except Exception as e:
-            logger.error(f"Erro ao enviar formulário: {str(e)}")
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    def verificar_status_relatorio(self, relatorio_id):
-        """Verifica status do relatório"""
-        url = f"{self.base_url}/relatorios/{relatorio_id}"
-        
-        try:
-            response = self.session.get(url, timeout=30)
-            response.raise_for_status()
-            
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Verificar barra de progresso
-            steps_bar = soup.find('div', {'id': 'relatorioStepsBar'})
-            status = 'PROCESSANDO'
-            
-            if steps_bar:
-                steps = steps_bar.find_all('div', class_='step')
-                if steps and 'done' in steps[-1].get('class', []):
-                    status = 'PRONTO'
-            
-            # Verificar link de download
-            download_link = None
-            for link in soup.find_all('a'):
-                href = link.get('href', '')
-                if '.xlsx' in href.lower() or 'download' in href.lower():
-                    download_link = href
-                    if not href.startswith('http'):
-                        download_link = f"{self.base_url}{href}"
-                    status = 'PRONTO'
-                    break
-            
-            return {
-                'status': status,
-                'download_url': download_link,
-                'html': response.text[:1000]  # Para debug
-            }
-            
-        except Exception as e:
-            logger.error(f"Erro ao verificar status: {str(e)}")
-            return {
-                'status': 'ERRO',
-                'error': str(e)
-            }
-    
-    def baixar_relatorio(self, download_url, curso_nome, periodo):
-        """Baixa o relatório"""
-        try:
-            # Criar nome do arquivo
-            nome_arquivo = f"{curso_nome.replace(' ', '_')}_{periodo[:4]}_{periodo[4:]}.xlsx"
-            caminho = os.path.join(PASTA_RELATORIOS, nome_arquivo)
-            
-            # Baixar
-            response = self.session.get(download_url, stream=True, timeout=30)
-            response.raise_for_status()
-            
-            with open(caminho, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            
-            return {
-                'success': True,
-                'caminho': caminho,
-                'tamanho': os.path.getsize(caminho)
-            }
-            
-        except Exception as e:
-            logger.error(f"Erro ao baixar relatório: {str(e)}")
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    def gerar_relatorio(self, curso_nome, periodo, progress_callback=None):
-        """Fluxo completo para gerar um relatório"""
-        
-        # 1. Carregar página do formulário
-        if progress_callback:
-            progress_callback(f"Carregando formulário...", 10)
-        
-        html_pagina = self.carregar_pagina_formulario()
-        if not html_pagina:
-            return {
-                'success': False,
-                'error': 'Não foi possível carregar o formulário',
-                'curso': curso_nome,
-                'periodo': periodo
-            }
-        
-        # 2. Criar parâmetros
-        if progress_callback:
-            progress_callback(f"Configurando filtros para {curso_nome}...", 20)
-        
-        try:
-            parametros = self.criar_parametros(curso_nome, periodo)
-        except Exception as e:
-            return {
-                'success': False,
-                'error': f"Erro ao criar parâmetros: {str(e)}",
-                'curso': curso_nome,
-                'periodo': periodo
-            }
-        
-        # 3. Enviar formulário
-        if progress_callback:
-            progress_callback(f"Enviando solicitação...", 30)
-        
-        resultado_envio = self.enviar_formulario(html_pagina, parametros)
-        if not resultado_envio or not resultado_envio.get('success'):
-            return {
-                'success': False,
-                'error': resultado_envio.get('error', 'Erro ao enviar formulário'),
-                'curso': curso_nome,
-                'periodo': periodo
-            }
-        
-        relatorio_id = resultado_envio['relatorio_id']
-        
-        # 4. Monitorar processamento
-        timeout = 1800  # 30 minutos
-        inicio = time.time()
-        tentativas = 0
-        
-        while time.time() - inicio < timeout:
-            tentativas += 1
-            
-            if progress_callback:
-                progresso = 30 + (min((time.time() - inicio) / timeout, 0.95) * 50)
-                progress_callback(f"Aguardando processamento (tentativa {tentativas})...", progresso)
-            
-            # Verificar status
-            status = self.verificar_status_relatorio(relatorio_id)
-            
-            if status['status'] == 'PRONTO' and status.get('download_url'):
-                # 5. Baixar relatório
-                if progress_callback:
-                    progress_callback(f"Baixando arquivo...", 90)
-                
-                resultado_download = self.baixar_relatorio(
-                    status['download_url'],
-                    curso_nome,
-                    periodo
-                )
-                
-                if resultado_download.get('success'):
-                    if progress_callback:
-                        progress_callback("Concluído!", 100)
-                    
-                    return {
-                        'success': True,
-                        'relatorio_id': relatorio_id,
-                        'caminho_arquivo': resultado_download['caminho'],
-                        'curso': curso_nome,
-                        'periodo': periodo,
-                        'tentativas': tentativas
-                    }
-                else:
-                    return {
-                        'success': False,
-                        'error': f"Erro no download: {resultado_download.get('error')}",
-                        'curso': curso_nome,
-                        'periodo': periodo
-                    }
-            
-            elif status['status'] == 'ERRO':
-                return {
-                    'success': False,
-                    'error': f"Erro no processamento: {status.get('error')}",
-                    'curso': curso_nome,
-                    'periodo': periodo
-                }
-            
-            # Aguardar antes de verificar novamente
-            time.sleep(30)  # 30 segundos
-        
-        # Timeout
-        return {
-            'success': False,
-            'error': f"Timeout após {timeout//60} minutos",
-            'curso': curso_nome,
-            'periodo': periodo
-        }
-    
-    def processar_periodos_intervalo(self, periodo_inicial, periodo_final):
-        """Gera lista de períodos"""
-        ano_inicial = int(periodo_inicial[:4])
-        sem_inicial = int(periodo_inicial[4])
-        ano_final = int(periodo_final[:4])
-        sem_final = int(periodo_final[4])
-        
-        periodos = []
-        ano_atual = ano_inicial
-        sem_atual = sem_inicial
-        
-        while (ano_atual < ano_final) or (ano_atual == ano_final and sem_atual <= sem_final):
-            periodos.append(f"{ano_atual}{sem_atual}")
-            
-            if sem_atual == 1:
-                sem_atual = 2
-            else:
-                sem_atual = 1
-                ano_atual += 1
-        
-        return periodos
+    return None, None
 
+def converter_periodo_para_valor(periodo_texto):
+    """Converte texto de período para valor do sistema"""
+    ano, semestre = parse_periodo_texto(periodo_texto)
+    if ano and semestre:
+        return f"{ano}{semestre}"
+    return None
 
-class InterfaceProgressoStreamlit:
-    """Interface de progresso para Streamlit"""
-    
-    def __init__(self, container):
-        self.container = container
-        self.progress_bar = None
-        self.status_text = None
-        self.contadores = {'sucesso': 0, 'erro': 0, 'total': 0}
-    
-    def inicializar(self, total_tarefas):
-        """Inicializa na interface do Streamlit"""
-        self.contadores['total'] = total_tarefas
-        
-        with self.container:
-            # Barra de progresso principal
-            self.progress_bar = st.progress(0)
-            self.status_text = st.empty()
-            
-            # Contadores
-            cols = st.columns(4)
-            self.col_total = cols[0].empty()
-            self.col_sucesso = cols[1].empty()
-            self.col_erro = cols[2].empty()
-            self.col_restante = cols[3].empty()
-            
-            self.atualizar_contadores()
-            
-            # Área para logs
-            st.markdown("---")
-            st.subheader("📋 Log de Execução")
-            self.log_container = st.empty()
-            self.logs = []
-    
-    def atualizar(self, mensagem, progresso):
-        """Atualiza barra e mensagem"""
-        if self.progress_bar:
-            self.progress_bar.progress(progresso / 100)
-        if self.status_text:
-            self.status_text.text(mensagem)
-    
-    def adicionar_log(self, mensagem):
-        """Adiciona mensagem ao log"""
-        self.logs.append(f"{time.strftime('%H:%M:%S')} - {mensagem}")
-        
-        # Atualizar container de logs (mantém apenas últimos 20 logs)
-        if len(self.logs) > 20:
-            self.logs = self.logs[-20:]
-        
-        with self.container:
-            self.log_container.text("\n".join(self.logs))
-    
-    def adicionar_resultado(self, curso, periodo, sucesso, detalhe=""):
-        """Registra resultado"""
-        periodo_display = f"{periodo[:4]}/{periodo[4:]}"
-        
-        if sucesso:
-            self.contadores['sucesso'] += 1
-            log_msg = f"✅ {curso} - {periodo_display}: {detalhe}"
-        else:
-            self.contadores['erro'] += 1
-            log_msg = f"❌ {curso} - {periodo_display}: {detalhe}"
-        
-        self.adicionar_log(log_msg)
-        self.atualizar_contadores()
-    
-    def atualizar_contadores(self):
-        """Atualiza contadores"""
-        concluido = self.contadores['sucesso'] + self.contadores['erro']
-        restante = self.contadores['total'] - concluido
-        
-        self.col_total.markdown(f"**Total:** {self.contadores['total']}")
-        self.col_sucesso.markdown(f"**✅ {self.contadores['sucesso']}**")
-        self.col_erro.markdown(f"**❌ {self.contadores['erro']}**")
-        self.col_restante.markdown(f"**⏳ {restante}**")
-    
-    def exibir_resumo(self):
-        """Exibe resumo final"""
-        with self.container:
-            st.markdown("---")
-            st.subheader("📊 Resumo da Execução")
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                taxa = (self.contadores['sucesso'] / self.contadores['total'] * 100) if self.contadores['total'] > 0 else 0
-                st.metric("Taxa de Sucesso", f"{taxa:.1f}%")
-            with col2:
-                st.metric("Relatórios Gerados", self.contadores['sucesso'])
-            with col3:
-                st.metric("Relatórios com Erro", self.contadores['erro'])
-
-# ================== INTERFACE PRINCIPAL ==================
-
-st.title("📊 Sistema de Análise de Evasão - UFF (Simplificado)")
+# Interface principal
+st.title("📊 Sistema de Análise de Evasão - UFF")
 st.markdown("---")
 
 # ETAPA 1 - LOGIN
@@ -502,8 +90,15 @@ if not st.session_state.authenticated:
     st.markdown("### 🔐 Login no Sistema Acadêmico da UFF")
     
     with st.form("login_form"):
-        username = st.text_input("Identificação (idUFF)", placeholder="CPF, email ou passaporte")
-        password = st.text_input("Senha", type="password", placeholder="Sua senha da UFF")
+        username = st.text_input(
+            "Identificação (idUFF)", 
+            placeholder="CPF, email ou passaporte"
+        )
+        password = st.text_input(
+            "Senha", 
+            type="password",
+            placeholder="Sua senha da UFF"
+        )
         
         submitted = st.form_submit_button("Acessar Sistema", type="primary", use_container_width=True)
         
@@ -525,9 +120,15 @@ if not st.session_state.authenticated:
                             st.error("❌ Falha no login. Verifique suas credenciais.")
                     except Exception as e:
                         st.error(f"❌ Erro durante o login: {str(e)}")
+    
+    st.info("""
+    **Sistema de Análise de Evasão - Departamento de Química UFF**
+    
+    Este sistema automatiza a geração e análise de relatórios de ingressantes do SISU.
+    """)
 
 else:
-    # Menu
+    # Menu principal
     col1, col2 = st.columns([3, 1])
     with col1:
         st.success(f"✅ Logado como: {st.session_state.username}")
@@ -541,45 +142,83 @@ else:
     
     st.markdown("---")
     
-    # Barra de etapas
+    # Barra de progresso das etapas
+    st.markdown("### 📋 Progresso do Processo")
+    
+    # Determinar etapa atual
+    if not st.session_state.selected_periodos:
+        st.session_state.etapa_atual = 1
+    elif not st.session_state.consulta_concluida:
+        st.session_state.etapa_atual = 2
+    elif not st.session_state.planilha_gerada:
+        st.session_state.etapa_atual = 3
+    else:
+        st.session_state.etapa_atual = 4
+    
     etapas = [
-        ("1. Configuração", 1),
-        ("2. Geração", 2),
-        ("3. Resultados", 3)
+        ("1. Configuração", 1, st.session_state.etapa_atual >= 1),
+        ("2. Geração", 2, st.session_state.etapa_atual >= 2),
+        ("3. Processamento", 3, st.session_state.etapa_atual >= 3),
+        ("4. Resultados", 4, st.session_state.etapa_atual >= 4)
     ]
     
-    cols = st.columns(3)
-    for col, (nome, num) in zip(cols, etapas):
+    cols = st.columns(4)
+    for col, (nome, num, concluida) in zip(cols, etapas):
         with col:
-            if st.session_state.etapa_atual == num:
-                st.info(f"**🔄 {nome}**")
-            elif st.session_state.etapa_atual > num:
-                st.success(f"**✅ {nome}**")
+            st.markdown(f"**{nome}**")
+            if concluida:
+                st.success("✅")
+            elif st.session_state.etapa_atual == num:
+                st.info("🔄")
             else:
-                st.markdown(f"**⏳ {nome}**")
+                st.info("⏳")
     
     st.markdown("---")
     
     # ETAPA 1 - CONFIGURAÇÃO
     if st.session_state.etapa_atual == 1:
-        st.markdown("## 🎯 Configuração da Análise")
+        st.markdown("## 🎯 Etapa 1 - Configuração")
         
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("📅 Período")
+            st.subheader("📅 Período de Análise")
             
-            ano_inicial = st.number_input("Ano Inicial", min_value=2000, max_value=2030, value=2025)
-            semestre_inicial = st.selectbox("Semestre Inicial", [1, 2], format_func=lambda x: f"{x}º Semestre")
+            # Período inicial
+            ano_inicial = st.number_input(
+                "Ano Inicial",
+                min_value=2010,
+                max_value=2030,
+                value=2025,
+                step=1
+            )
+            semestre_inicial = st.selectbox(
+                "Semestre Inicial",
+                options=[1, 2],
+                format_func=lambda x: f"{x}º Semestre"
+            )
             
-            ano_final = st.number_input("Ano Final", min_value=2000, max_value=2030, value=2025)
-            semestre_final = st.selectbox("Semestre Final", [1, 2], index=1, format_func=lambda x: f"{x}º Semestre")
+            # Período final
+            ano_final = st.number_input(
+                "Ano Final",
+                min_value=2010,
+                max_value=2030,
+                value=2025,
+                step=1
+            )
+            semestre_final = st.selectbox(
+                "Semestre Final",
+                options=[1, 2],
+                index=1,
+                format_func=lambda x: f"{x}º Semestre"
+            )
             
+            # Validar intervalo
             if ano_final < ano_inicial or (ano_final == ano_inicial and semestre_final < semestre_inicial):
                 st.error("Período final deve ser igual ou posterior ao inicial")
         
         with col2:
-            st.subheader("📚 Cursos")
+            st.subheader("📚 Cursos para Análise")
             
             cursos_disponiveis = [
                 'Química (Licenciatura)',
@@ -588,71 +227,72 @@ else:
             ]
             
             cursos_selecionados = st.multiselect(
-                "Selecione os cursos para análise:",
+                "Selecione os cursos:",
                 options=cursos_disponiveis,
-                default=cursos_disponiveis
+                default=cursos_disponiveis,
+                help="Selecione os cursos para análise"
             )
             
             if cursos_selecionados:
                 st.success(f"✅ {len(cursos_selecionados)} curso(s) selecionado(s)")
         
-        # Calcular total
+        # Calcular total de relatórios
         if st.button("📊 Calcular Total de Relatórios", type="secondary"):
             if not cursos_selecionados:
                 st.error("Selecione pelo menos um curso")
             else:
-                periodo_inicial = f"{ano_inicial}{semestre_inicial}"
-                periodo_final = f"{ano_final}{semestre_final}"
+                periodo_inicial_valor = f"{ano_inicial}{semestre_inicial}"
+                periodo_final_valor = f"{ano_final}{semestre_final}"
                 
-                gerador = GeradorRelatoriosStreamlit(st.session_state.authenticator.session)
-                periodos = gerador.processar_periodos_intervalo(periodo_inicial, periodo_final)
+                # Calcular períodos
+                gerador = GeradorRelatoriosOtimizado(st.session_state.authenticator.session)
+                periodos_lista = gerador.processar_periodos_intervalo(
+                    periodo_inicial_valor, 
+                    periodo_final_valor
+                )
                 
-                total = len(cursos_selecionados) * len(periodos)
+                total_relatorios = len(cursos_selecionados) * len(periodos_lista)
                 
                 st.info(f"""
                 **Resumo da configuração:**
-                
-                **Cursos selecionados:**
-                {chr(10).join(f'- {curso}' for curso in cursos_selecionados)}
-                
-                **Períodos a processar:**
-                {chr(10).join(f'- {p[:4]}/{p[4:]}' for p in periodos)}
-                
-                **Total de relatórios:** {total}
-                
-                **Tempo estimado:** ~{total * 3} minutos
+                - Cursos: {len(cursos_selecionados)}
+                - Períodos: {len(periodos_lista)} ({periodo_inicial_valor[:4]}/{periodo_inicial_valor[4:]} a {periodo_final_valor[:4]}/{periodo_final_valor[4:]})
+                - **Total de relatórios a gerar:** {total_relatorios}
                 """)
         
-        # Confirmar
+        # Botão para confirmar
         st.markdown("---")
         
-        if st.button("✅ Confirmar e Iniciar Geração", type="primary", use_container_width=True):
+        if st.button("✅ Confirmar e Prosseguir para Geração", type="primary", use_container_width=True):
             if not cursos_selecionados:
                 st.error("Selecione pelo menos um curso")
             else:
+                # Salvar configuração
                 st.session_state.selected_cursos = cursos_selecionados
                 st.session_state.selected_periodos = {
                     'inicial': f"{ano_inicial}{semestre_inicial}",
-                    'final': f"{ano_final}{semestre_final}"
+                    'final': f"{ano_final}{semestre_final}",
+                    'inicial_display': f"{ano_inicial}/{semestre_inicial}º",
+                    'final_display': f"{ano_final}/{semestre_final}º"
                 }
                 
                 st.session_state.etapa_atual = 2
-                st.success("✅ Configuração salva!")
+                st.success("✅ Configuração salva com sucesso!")
                 time.sleep(1)
                 st.rerun()
     
-    # ETAPA 2 - GERAÇÃO
+    # ETAPA 2 - GERAÇÃO DE RELATÓRIOS
     elif st.session_state.etapa_atual == 2:
-        st.markdown("## 🔍 Geração de Relatórios")
+        st.markdown("## 🔍 Etapa 2 - Geração de Relatórios")
         
-        # Mostrar configuração
+        # Mostrar configuração atual
         with st.expander("📋 Configuração Atual", expanded=True):
             col1, col2 = st.columns(2)
             with col1:
                 periodos = st.session_state.selected_periodos
-                st.markdown(f"**Período:** {periodos['inicial'][:4]}/{periodos['inicial'][4:]} a {periodos['final'][:4]}/{periodos['final'][4:]}")
+                st.markdown(f"**Período:** {periodos['inicial_display']} a {periodos['final_display']}")
                 st.markdown(f"**Localidade:** Niterói")
-                st.markdown(f"**Forma de Ingresso:** SISU (automático por semestre)")
+                st.markdown(f"**Formas de Ingresso:** SISU 1ª e 2ª Edição")
             
             with col2:
                 cursos = st.session_state.selected_cursos
@@ -661,7 +301,7 @@ else:
                     st.markdown(f"- {curso}")
         
         # Calcular total
-        gerador = GeradorRelatoriosStreamlit(st.session_state.authenticator.session)
+        gerador = GeradorRelatoriosOtimizado(st.session_state.authenticator.session)
         periodos_lista = gerador.processar_periodos_intervalo(
             st.session_state.selected_periodos['inicial'],
             st.session_state.selected_periodos['final']
@@ -670,23 +310,21 @@ else:
         total_relatorios = len(st.session_state.selected_cursos) * len(periodos_lista)
         
         st.info(f"""
-        **Pronto para gerar {total_relatorios} relatório(s)**
-        
-        **Filtros que serão aplicados em CADA relatório:**
-        1. Localidade: Niterói
-        2. Curso específico selecionado
-        3. Desdobramento correto do curso
-        4. Forma de ingresso SISU (1ª ou 2ª edição conforme o semestre)
-        5. Período de ingresso específico
+        **Pronto para gerar {total_relatorios} relatório(s):**
+        - Para cada curso, será gerado 1 relatório por período
+        - Cada relatório inclui **todas as modalidades** (Ampla Concorrência + Ações Afirmativas)
+        - O sistema separará as modalidades automaticamente após o download
+        - Tempo estimado: ~2-5 minutos por relatório
         """)
         
-        # Controles
+        # Controles de geração
         if not st.session_state.geracao_em_andamento:
             col1, col2 = st.columns(2)
             
             with col1:
                 if st.button("🚀 Iniciar Geração de Relatórios", type="primary", use_container_width=True):
                     st.session_state.geracao_em_andamento = True
+                    st.session_state.interface_progresso = InterfaceProgresso()
                     st.rerun()
             
             with col2:
@@ -694,54 +332,66 @@ else:
                     st.session_state.etapa_atual = 1
                     st.rerun()
         
-        # Geração em andamento
+        # Se geração em andamento
         if st.session_state.geracao_em_andamento:
-            # Container para progresso
-            progress_container = st.container()
-            
             # Inicializar interface de progresso
-            interface = InterfaceProgressoStreamlit(progress_container)
+            if not st.session_state.interface_progresso:
+                st.session_state.interface_progresso = InterfaceProgresso()
+            
+            interface = st.session_state.interface_progresso
             interface.inicializar(total_relatorios)
             
-            # Inicializar gerador
-            gerador = GeradorRelatoriosStreamlit(st.session_state.authenticator.session)
+            # Função de callback para progresso
+            def callback_progresso(mensagem, progresso):
+                interface.atualizar(mensagem, progresso)
             
-            # Criar container para resultados
-            resultados_container = st.container()
+            # Gerar relatórios
+            gerador = GeradorRelatoriosOtimizado(st.session_state.authenticator.session)
+            
+            # Obter cursos configurados
+            cursos_config = gerador.obter_cursos_predefinidos(st.session_state.selected_cursos)
             
             # Processar cada curso e período
             resultados = {}
+            sucessos = 0
+            erros = 0
             
-            for curso_nome in st.session_state.selected_cursos:
+            for i, curso_config in enumerate(cursos_config):
+                curso_nome = curso_config['nome']
                 resultados[curso_nome] = []
                 
                 for periodo in periodos_lista:
-                    # Callback de progresso
-                    def callback_progresso(mensagem, progresso):
-                        interface.atualizar(mensagem, progresso)
+                    # Atualizar status
+                    callback_progresso(
+                        f"Gerando {curso_nome} - {periodo[:4]}/{periodo[4:]}",
+                        0
+                    )
                     
-                    # Log inicial
-                    interface.adicionar_log(f"Iniciando: {curso_nome} - {periodo[:4]}/{periodo[4:]}")
+                    # Determinar forma de ingresso
+                    forma_ingresso = gerador._determinar_forma_ingresso(periodo)
                     
                     # Gerar relatório
-                    resultado = gerador.gerar_relatorio(
-                        curso_nome,
+                    resultado = gerador.gerar_relatorio_individual_com_progresso(
+                        curso_config,
                         periodo,
+                        forma_ingresso,
                         callback_progresso
                     )
                     
-                    # Registrar resultado
+                    # Adicionar resultado
                     resultados[curso_nome].append(resultado)
                     
                     # Atualizar interface
                     if resultado.get('success'):
+                        sucessos += 1
                         interface.adicionar_resultado(
                             curso_nome,
                             periodo,
                             True,
-                            f"Relatório gerado (ID: {resultado.get('relatorio_id')})"
+                            "Relatório gerado com sucesso"
                         )
                     else:
+                        erros += 1
                         interface.adicionar_resultado(
                             curso_nome,
                             periodo,
@@ -750,179 +400,201 @@ else:
                         )
                     
                     # Aguardar entre requisições
-                    time.sleep(5)
+                    time.sleep(3)
             
             # Finalizar
-            st.session_state.resultados = resultados
-            st.session_state.geracao_concluida = True
+            st.session_state.resultados_geracao = resultados
+            st.session_state.consulta_concluida = True
             st.session_state.geracao_em_andamento = False
             
+            # Exibir resumo
             interface.atualizar("✅ Geração concluída!", 100)
-            interface.exibir_resumo()
-            
             time.sleep(2)
             
-            # Exibir resultados detalhados
-            with resultados_container:
-                st.markdown("### 📋 Resultados Detalhados")
-                
-                dados_tabela = []
-                for curso_nome, resultados_curso in resultados.items():
-                    for resultado in resultados_curso:
-                        periodo_display = f"{resultado.get('periodo', '')[0:4]}/{resultado.get('periodo', '')[4:]}"
-                        
-                        dados_tabela.append({
-                            'Curso': curso_nome,
-                            'Período': periodo_display,
-                            'Status': '✅ Sucesso' if resultado.get('success') else '❌ Erro',
-                            'Detalhes': resultado.get('error', 'Concluído')[:50],
-                            'ID': resultado.get('relatorio_id', 'N/A')
-                        })
-                
-                if dados_tabela:
-                    df = pd.DataFrame(dados_tabela)
-                    st.dataframe(df, use_container_width=True, hide_index=True)
+            # Mostrar tabela de resultados
+            interface.exibir_tabela_resultados()
             
             # Botão para continuar
             if st.button("📊 Processar Dados e Gerar Estatísticas", type="primary", use_container_width=True):
                 st.session_state.etapa_atual = 3
                 st.rerun()
     
-    # ETAPA 3 - RESULTADOS
+    # ETAPA 3 - PROCESSAMENTO DE DADOS
     elif st.session_state.etapa_atual == 3:
-        st.markdown("## 📊 Resultados e Estatísticas")
+        st.markdown("## ⚙️ Etapa 3 - Processamento de Dados")
         
-        if not st.session_state.get('resultados'):
-            st.error("Nenhum dado para processar.")
-            if st.button("🔙 Voltar para Geração"):
+        if not st.session_state.resultados_geracao:
+            st.error("Nenhum dado para processar. Volte para a Etapa 2.")
+            if st.button("🔙 Voltar para Etapa 2"):
                 st.session_state.etapa_atual = 2
                 st.rerun()
         else:
-            # Contar sucessos
+            # Contar relatórios bem-sucedidos
             total_sucessos = 0
             total_relatorios = 0
-            arquivos_sucesso = []
             
-            for curso_nome, resultados_curso in st.session_state.resultados.items():
-                for resultado in resultados_curso:
+            for curso_nome, resultados in st.session_state.resultados_geracao.items():
+                for resultado in resultados:
                     total_relatorios += 1
                     if resultado.get('success'):
                         total_sucessos += 1
-                        arquivos_sucesso.append(resultado.get('caminho_arquivo'))
             
-            st.success(f"✅ {total_sucessos} de {total_relatorios} relatórios gerados com sucesso")
+            st.info(f"""
+            **{total_sucessos} de {total_relatorios}** relatórios foram baixados com sucesso.
             
-            if arquivos_sucesso:
-                st.info(f"**Arquivos gerados:**")
-                for arquivo in arquivos_sucesso:
-                    if arquivo and os.path.exists(arquivo):
-                        tamanho_mb = os.path.getsize(arquivo) / (1024 * 1024)
-                        st.markdown(f"- `{os.path.basename(arquivo)}` ({tamanho_mb:.1f} MB)")
+            O sistema irá agora:
+            1. Ler e analisar cada arquivo XLSX
+            2. Separar dados por modalidade de ingresso
+            3. Classificar situações e cancelamentos
+            4. Calcular percentuais e estatísticas
+            5. Gerar planilha consolidada
+            """)
             
-            # Processador de dados simplificado
-            if st.button("📈 Processar Dados dos Relatórios", type="primary"):
+            # Botão para processar
+            if st.button("▶️ Iniciar Processamento", type="primary", use_container_width=True):
                 with st.spinner("Processando dados..."):
-                    dados_consolidados = []
+                    # Processar dados
+                    processador = ProcessadorDadosOtimizado()
+                    dados_consolidados = processador.processar_todos_relatorios(
+                        st.session_state.resultados_geracao
+                    )
                     
-                    for curso_nome, resultados_curso in st.session_state.resultados.items():
-                        for resultado in resultados_curso:
-                            if resultado.get('success') and resultado.get('caminho_arquivo'):
-                                caminho = resultado['caminho_arquivo']
-                                periodo = resultado.get('periodo', '')
-                                periodo_display = f"{periodo[:4]}/{periodo[4:]}" if len(periodo) == 5 else periodo
+                    # Gerar planilha
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    caminho_planilha = os.path.join(PASTA_RELATORIOS, f"estatisticas_evasao_{timestamp}.xlsx")
+                    
+                    # Criar planilha simplificada
+                    with pd.ExcelWriter(caminho_planilha, engine='xlsxwriter') as writer:
+                        # RESUMO GERAL
+                        dados_resumo = []
+                        for curso_nome, dados_curso in dados_consolidados['por_curso'].items():
+                            totais = dados_curso['totais']
+                            dados_resumo.append({
+                                'Curso': curso_nome,
+                                'Total Matrículas': totais['matriculas'],
+                                'Matrículas Ativas': totais['ativos'],
+                                'Cancelamentos': totais['cancelamentos'],
+                                '% Cancelamentos': round((totais['cancelamentos'] / totais['matriculas'] * 100), 2) if totais['matriculas'] > 0 else 0,
+                                'Formados': totais['formados'],
+                                '% Formados': round((totais['formados'] / totais['matriculas'] * 100), 2) if totais['matriculas'] > 0 else 0,
+                                'Ampla Concorrência': totais['ampla_concorrencia'],
+                                'Ações Afirmativas': totais['acoes_afirmativas']
+                            })
+                        
+                        df_resumo = pd.DataFrame(dados_resumo)
+                        df_resumo.to_excel(writer, sheet_name='RESUMO GERAL', index=False)
+                        
+                        # DETALHES POR PERÍODO
+                        dados_detalhes = []
+                        for curso_nome, dados_curso in dados_consolidados['por_curso'].items():
+                            for periodo, dados_periodo in dados_curso['periodos'].items():
+                                periodo_display = f"{periodo[:4]}/{periodo[4:]}"
                                 
-                                try:
-                                    # Ler Excel
-                                    df = pd.read_excel(caminho)
-                                    
-                                    # Análise básica
-                                    total = len(df)
-                                    
-                                    # Contar por modalidade (se existir coluna 'MODALIDADE')
-                                    ampla = 0
-                                    acoes = 0
-                                    if 'MODALIDADE' in df.columns:
-                                        modalidades = df['MODALIDADE'].fillna('')
-                                        ampla = len(modalidades[modalidades.str.startswith('A', na=False)])
-                                        acoes = len(modalidades[modalidades.str.startswith('L', na=False)])
-                                    
-                                    dados_consolidados.append({
-                                        'Curso': curso_nome,
-                                        'Período': periodo_display,
-                                        'Total Matrículas': total,
-                                        'Ampla Concorrência': ampla,
-                                        'Ações Afirmativas': acoes,
-                                        'Arquivo': os.path.basename(caminho)
-                                    })
-                                    
-                                except Exception as e:
-                                    st.warning(f"Erro ao processar {caminho}: {str(e)}")
+                                linha = {
+                                    'Curso': curso_nome,
+                                    'Período': periodo_display,
+                                    'Total': dados_periodo['total_registros'],
+                                    'Ativos': dados_periodo['matriculas_ativas'],
+                                    'Cancelamentos': dados_periodo['total_cancelamentos'],
+                                    '% Cancelamentos': dados_periodo.get('percentual_cancelamentos', 0),
+                                    'Ampla Concorrência': dados_periodo['ampla_concorrencia'],
+                                    '% Ampla': dados_periodo.get('percentual_ampla', 0),
+                                    'Ações Afirmativas': dados_periodo['acoes_afirmativas'],
+                                    '% Ações': dados_periodo.get('percentual_acoes', 0)
+                                }
+                                
+                                # Adicionar categorias de situação
+                                for cat, dados_cat in dados_periodo['categorias_situacao'].items():
+                                    linha[f'{cat}'] = dados_cat['quantidade']
+                                    linha[f'% {cat}'] = dados_cat['percentual']
+                                
+                                dados_detalhes.append(linha)
+                        
+                        if dados_detalhes:
+                            df_detalhes = pd.DataFrame(dados_detalhes)
+                            df_detalhes.to_excel(writer, sheet_name='DETALHES', index=False)
                     
-                    # Exibir resultados
-                    if dados_consolidados:
-                        df_resultados = pd.DataFrame(dados_consolidados)
-                        
-                        st.markdown("### 📊 Dados Consolidados")
-                        st.dataframe(df_resultados, use_container_width=True)
-                        
-                        # Calcular totais
-                        totais = df_resultados.groupby('Curso').agg({
-                            'Total Matrículas': 'sum',
-                            'Ampla Concorrência': 'sum',
-                            'Ações Afirmativas': 'sum'
-                        }).reset_index()
-                        
-                        st.markdown("### 📈 Totais por Curso")
-                        st.dataframe(totais, use_container_width=True)
-                        
-                        # Botão para exportar
-                        if st.button("📥 Exportar para Excel"):
-                            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                            caminho_export = os.path.join(PASTA_RELATORIOS, f"resultados_{timestamp}.xlsx")
-                            
-                            with pd.ExcelWriter(caminho_export, engine='openpyxl') as writer:
-                                df_resultados.to_excel(writer, sheet_name='Detalhes', index=False)
-                                totais.to_excel(writer, sheet_name='Totais', index=False)
-                            
-                            with open(caminho_export, 'rb') as f:
-                                st.download_button(
-                                    label="Baixar Planilha",
-                                    data=f,
-                                    file_name=f"resultados_evasao_{timestamp}.xlsx",
-                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                )
+                    st.session_state.dados_consolidados = dados_consolidados
+                    st.session_state.caminho_planilha = caminho_planilha
+                    st.session_state.planilha_gerada = True
+                    st.session_state.etapa_atual = 4
+                    
+                    st.success("✅ Processamento concluído!")
+                    time.sleep(1)
+                    st.rerun()
+            
+            if st.button("🔙 Voltar para Etapa 2", type="secondary", use_container_width=True):
+                st.session_state.etapa_atual = 2
+                st.rerun()
+    
+    # ETAPA 4 - RESULTADOS
+    elif st.session_state.etapa_atual == 4:
+        st.markdown("## 📊 Etapa 4 - Resultados")
+        
+        if st.session_state.planilha_gerada and st.session_state.caminho_planilha:
+            st.success("✅ Planilha gerada com sucesso!")
+            
+            # Mostrar resumo
+            if st.session_state.dados_consolidados:
+                resumo = st.session_state.dados_consolidados.get('resumo_geral', {})
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total de Cursos", resumo.get('total_cursos', 0))
+                with col2:
+                    st.metric("Total de Períodos", resumo.get('total_periodos', 0))
+                with col3:
+                    st.metric("Total de Matrículas", resumo.get('total_matriculas', 0))
+                with col4:
+                    st.metric("Total Cancelamentos", resumo.get('total_cancelamentos', 0))
+            
+            # Botão para download
+            with open(st.session_state.caminho_planilha, 'rb') as f:
+                st.download_button(
+                    label="📥 Baixar Planilha Consolidada",
+                    data=f,
+                    file_name=os.path.basename(st.session_state.caminho_planilha),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    use_container_width=True
+                )
+            
+            # Preview da planilha
+            with st.expander("🔍 Visualizar Dados", expanded=True):
+                try:
+                    df_resumo = pd.read_excel(st.session_state.caminho_planilha, sheet_name='RESUMO GERAL')
+                    st.dataframe(df_resumo, use_container_width=True)
+                except Exception as e:
+                    st.warning(f"Não foi possível visualizar os dados: {str(e)}")
             
             # Botões de controle
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("🔄 Novo Processo", type="secondary", use_container_width=True):
+                    # Limpar dados do processo atual
                     st.session_state.selected_cursos = []
                     st.session_state.selected_periodos = {}
-                    st.session_state.geracao_concluida = False
-                    st.session_state.resultados = {}
+                    st.session_state.consulta_concluida = False
+                    st.session_state.resultados_geracao = {}
+                    st.session_state.dados_consolidados = None
+                    st.session_state.planilha_gerada = False
+                    st.session_state.caminho_planilha = ''
                     st.session_state.etapa_atual = 1
                     st.rerun()
             
             with col2:
-                if st.button("🔍 Ver Relatórios Gerados", type="primary", use_container_width=True):
-                    st.markdown("### 📁 Relatórios na Pasta")
-                    
-                    if os.path.exists(PASTA_RELATORIOS):
-                        arquivos = os.listdir(PASTA_RELATORIOS)
-                        if arquivos:
-                            for arquivo in sorted(arquivos):
-                                if arquivo.endswith('.xlsx'):
-                                    caminho = os.path.join(PASTA_RELATORIOS, arquivo)
-                                    tamanho_mb = os.path.getsize(caminho) / (1024 * 1024)
-                                    st.markdown(f"- **{arquivo}** ({tamanho_mb:.1f} MB)")
-                        else:
-                            st.info("Nenhum arquivo na pasta de relatórios")
-                    else:
-                        st.warning("Pasta de relatórios não existe")
+                if st.button("📈 Gerar Gráficos", type="primary", use_container_width=True):
+                    st.info("Funcionalidade de gráficos será implementada em breve.")
 
 # Rodapé
 st.markdown("---")
-st.caption(f"🕒 {datetime.now().strftime('%H:%M:%S')} | 📊 Departamento de Química - UFF | 🔒 Sistema de automação seguro")
+footer_col1, footer_col2, footer_col3 = st.columns(3)
+with footer_col1:
+    st.caption(f"🕒 {datetime.now().strftime('%H:%M:%S')}")
+with footer_col2:
+    st.caption("📊 Departamento de Química - UFF")
+with footer_col3:
+    st.caption("🔒 Sistema de automação seguro")
 
 # Inicialização
 if __name__ == "__main__":
