@@ -37,6 +37,8 @@ class GeradorRelatoriosOtimizado:
     
     def criar_filtros_para_curso(self, curso_config, periodo, forma_ingresso):
         """Cria dicionário de filtros para um curso específico"""
+        logger.info(f"Criando filtros para: {curso_config['nome']} - {curso_config['codigo_curso']}:{curso_config['codigo_desdobramento']}")
+        
         filtros = {
             'idlocalidade': '1',  # Niterói
             'idcurso': curso_config['codigo_curso'],
@@ -48,8 +50,10 @@ class GeradorRelatoriosOtimizado:
             'idacaoafirmativa': '',  # TODAS as modalidades (Ampla + Ações Afirmativas)
             'anosem_ingresso': periodo,
             'anosem_desvinculacao': '',  # Não filtrar por desvinculação
-            'format': 'xls'  # Formato XLSX
+            'format': 'xls'  # Formato XLSX - conforme botão no HTML
         }
+        
+        logger.debug(f"Filtros criados: {filtros}")
         return filtros
     
     def gerar_relatorio_individual_com_progresso(self, curso_config, periodo, forma_ingresso, callback_progresso=None):
@@ -71,6 +75,7 @@ class GeradorRelatoriosOtimizado:
             resultado = self.form_handler.gerar_relatorio(filtros)
             
             if not resultado.get('success'):
+                logger.error(f"Erro ao gerar relatório: {resultado.get('error')}")
                 return {
                     'success': False,
                     'error': resultado.get('error', 'Erro ao enviar solicitação'),
@@ -79,6 +84,7 @@ class GeradorRelatoriosOtimizado:
                 }
             
             if not resultado.get('relatorio_id'):
+                logger.error("ID do relatório não retornado")
                 return {
                     'success': False,
                     'error': 'ID do relatório não retornado',
@@ -100,6 +106,7 @@ class GeradorRelatoriosOtimizado:
             )
             
             if not status_info or status_info.get('status') != 'PRONTO':
+                logger.error(f"Relatório não ficou pronto. Status: {status_info}")
                 return {
                     'success': False,
                     'error': 'Relatório não ficou pronto',
@@ -114,12 +121,15 @@ class GeradorRelatoriosOtimizado:
             caminho_arquivo = self.rel_automator.baixar_relatorio(status_info)
             
             if not caminho_arquivo:
+                logger.error("Erro ao baixar arquivo")
                 return {
                     'success': False,
                     'error': 'Erro ao baixar arquivo',
                     'curso': curso_config['nome'],
                     'periodo': periodo
                 }
+            
+            logger.info(f"Relatório gerado com sucesso: {caminho_arquivo}")
             
             if callback_progresso:
                 callback_progresso(f"Concluído!", 100)
@@ -135,7 +145,7 @@ class GeradorRelatoriosOtimizado:
             }
             
         except Exception as e:
-            logger.error(f"Erro ao gerar relatório: {str(e)}")
+            logger.error(f"Erro ao gerar relatório: {str(e)}", exc_info=True)
             return {
                 'success': False,
                 'error': str(e),
@@ -207,11 +217,12 @@ class GeradorRelatoriosOtimizado:
             time.sleep(intervalo)
         
         # Timeout atingido
+        logger.warning(f"Timeout ao aguardar relatório {relatorio_id}")
         return None
     
     def _determinar_forma_ingresso(self, periodo):
         """Determina a forma de ingresso baseada no semestre do período"""
-        # Extrair semestre do período (ex: "20251" → semestre 1)
+        # Baseado no HTML: SISU 1ª Edição = "125", SISU 2ª Edição = "124"
         if periodo.endswith('1'):  # 1º semestre
             return '125'  # SISU 1ª Edição
         else:  # 2º semestre
@@ -243,6 +254,7 @@ class GeradorRelatoriosOtimizado:
                 sem_atual = 1
                 ano_atual += 1
         
+        logger.info(f"Gerados {len(periodos)} períodos: {periodos}")
         return periodos
     
     def obter_cursos_predefinidos(self, cursos_selecionados=None):
@@ -251,13 +263,13 @@ class GeradorRelatoriosOtimizado:
             {
                 'nome': 'Química (Licenciatura)',
                 'codigo_curso': '12700',  # Código do curso Química
-                'codigo_desdobramento': '12700',  # Desdobramento específico
+                'codigo_desdobramento': '12700',  # Desdobramento específico para Licenciatura
                 'tipo': 'Licenciatura'
             },
             {
                 'nome': 'Química (Bacharelado)',
                 'codigo_curso': '12700',  # Código do curso Química
-                'codigo_desdobramento': '312700',  # Desdobramento específico
+                'codigo_desdobramento': '312700',  # Desdobramento específico para Bacharelado
                 'tipo': 'Bacharelado'
             },
             {
@@ -269,8 +281,11 @@ class GeradorRelatoriosOtimizado:
         ]
         
         if cursos_selecionados:
-            return [c for c in todos_cursos if c['nome'] in cursos_selecionados]
+            cursos_filtrados = [c for c in todos_cursos if c['nome'] in cursos_selecionados]
+            logger.info(f"Cursos selecionados: {[c['nome'] for c in cursos_filtrados]}")
+            return cursos_filtrados
         
+        logger.info(f"Todos os cursos selecionados: {[c['nome'] for c in todos_cursos]}")
         return todos_cursos
 
 
@@ -287,6 +302,7 @@ class ProcessadorDadosOtimizado:
             df = pd.read_excel(caminho_arquivo)
             
             if df.empty:
+                logger.warning(f"Arquivo vazio: {caminho_arquivo}")
                 return None
             
             # Normalizar nomes de colunas (remover espaços, maiúsculas)
@@ -400,10 +416,11 @@ class ProcessadorDadosOtimizado:
                     (dados['acoes_afirmativas'] / dados['total_registros']) * 100, 2
                 ) if dados['total_registros'] > 0 else 0
             
+            logger.info(f"Processado {caminho_arquivo}: {dados['total_registros']} registros")
             return dados
             
         except Exception as e:
-            logger.error(f"Erro ao processar relatório {caminho_arquivo}: {str(e)}")
+            logger.error(f"Erro ao processar relatório {caminho_arquivo}: {str(e)}", exc_info=True)
             return None
     
     def _classificar_motivos_cancelamento(self, motivos_series):
@@ -450,6 +467,7 @@ class ProcessadorDadosOtimizado:
     
     def processar_todos_relatorios(self, resultados_geracao):
         """Processa todos os relatórios e consolida dados"""
+        logger.info(f"Processando {len(resultados_geracao)} cursos")
         dados_consolidados = {
             'por_curso': {},
             'por_periodo': {},
@@ -464,6 +482,7 @@ class ProcessadorDadosOtimizado:
         }
         
         periodos_unicos = set()
+        relatorios_processados = 0
         
         for curso_nome, resultados_curso in resultados_geracao.items():
             if curso_nome not in dados_consolidados['por_curso']:
@@ -493,6 +512,7 @@ class ProcessadorDadosOtimizado:
                     
                     if dados:
                         dados_consolidados['por_curso'][curso_nome]['periodos'][periodo] = dados
+                        relatorios_processados += 1
                         
                         # Acumular totais do curso
                         dados_consolidados['por_curso'][curso_nome]['totais']['matriculas'] += dados['total_registros']
@@ -512,6 +532,7 @@ class ProcessadorDadosOtimizado:
             dados_consolidados['resumo_geral']['total_formados'] += dados_curso['totais']['formados']
             dados_consolidados['resumo_geral']['total_ativos'] += dados_curso['totais']['ativos']
         
+        logger.info(f"Processamento concluído: {relatorios_processados} relatórios processados")
         return dados_consolidados
 
 
