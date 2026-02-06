@@ -337,118 +337,139 @@ else:
                     st.rerun()
         
         # Se geração em andamento
-        if st.session_state.geracao_em_andamento:
-            # Criar os elementos de UI diretamente no contexto do Streamlit
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            resultados_container = st.container()
+if st.session_state.geracao_em_andamento:
+    # Criar os elementos de UI diretamente no contexto do Streamlit
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    resultados_container = st.container()
+    
+    # Criar colunas para contadores
+    col_status, col_sucesso, col_erro = st.columns(3)
+    with col_status:
+        st.markdown("**Status**")
+        status_counter = st.empty()
+    with col_sucesso:
+        st.markdown("**✅ Sucesso**")
+        sucesso_counter = st.empty()
+    with col_erro:
+        st.markdown("**❌ Erro**")
+        erro_counter = st.empty()
+    
+    # Inicializar contadores
+    status_counter.markdown("**Total:** 0")
+    sucesso_counter.markdown("**✅ 0**")
+    erro_counter.markdown("**❌ 0**")
+    
+    # Inicializar lista de resultados
+    tabela_resultados = []
+    
+    # Função de callback para progresso
+    def callback_progresso(mensagem, progresso):
+        progress_bar.progress(progresso / 100)
+        status_text.text(mensagem)
+    
+    # Função para adicionar resultado
+    def adicionar_resultado(curso, periodo, sucesso, mensagem=None):
+        periodo_display = f"{periodo[:4]}/{periodo[4:]}" if len(periodo) == 5 else periodo
+        
+        if sucesso:
+            emoji = "✅"
+            status = "Sucesso"
+        else:
+            emoji = "❌"
+            status = "Erro"
+        
+        tabela_resultados.append({
+            'Curso': curso,
+            'Período': periodo_display,
+            'Status': f"{emoji} {status}",
+            'Detalhe': mensagem or ''
+        })
+        
+        # Atualizar contadores
+        sucessos = sum(1 for r in tabela_resultados if '✅' in r['Status'])
+        erros = sum(1 for r in tabela_resultados if '❌' in r['Status'])
+        total = len(tabela_resultados)
+        
+        status_counter.markdown(f"**Total:** {total}")
+        sucesso_counter.markdown(f"**✅ {sucessos}**")
+        erro_counter.markdown(f"**❌ {erros}**")
+    
+    # PASSO 1: Descobrir valores corretos antes de gerar
+    callback_progresso("🔍 Verificando valores disponíveis no sistema...", 5)
+    
+    gerador = GeradorRelatoriosOtimizado(st.session_state.authenticator.session)
+    
+    # Verificar valores disponíveis
+    logger.info("Iniciando verificação de valores disponíveis...")
+    cursos_disponiveis = gerador.descobrir_valores_cursos()
+    
+    if cursos_disponiveis:
+        callback_progresso("✅ Valores verificados, iniciando geração...", 10)
+        logger.info("Valores verificados com sucesso")
+    else:
+        callback_progresso("⚠️ Usando valores padrão, iniciando geração...", 10)
+        logger.warning("Usando valores padrão - não foi possível verificar valores")
+    
+    # Obter cursos configurados (agora com valores verificados)
+    cursos_config = gerador.obter_cursos_predefinidos(st.session_state.selected_cursos)
+    
+    # Processar cada curso e período
+    resultados = {}
+    sucessos = 0
+    erros = 0
+    
+    for i, curso_config in enumerate(cursos_config):
+        curso_nome = curso_config['nome']
+        resultados[curso_nome] = []
+        
+        # Log do curso que será processado
+        logger.info(f"Processando curso: {curso_nome} (idcurso={curso_config['codigo_curso']}, iddesdobramento={curso_config['codigo_desdobramento']})")
+        
+        for periodo in periodos_lista:
+            # Atualizar status
+            callback_progresso(
+                f"Gerando {curso_nome} - {periodo[:4]}/{periodo[4:]}",
+                0
+            )
             
-            # Criar colunas para contadores
-            col_status, col_sucesso, col_erro = st.columns(3)
-            with col_status:
-                st.markdown("**Status**")
-                status_counter = st.empty()
-            with col_sucesso:
-                st.markdown("**✅ Sucesso**")
-                sucesso_counter = st.empty()
-            with col_erro:
-                st.markdown("**❌ Erro**")
-                erro_counter = st.empty()
+            # Determinar forma de ingresso
+            forma_ingresso = gerador._determinar_forma_ingresso(periodo)
+            logger.info(f"Gerando relatório: {curso_nome} - {periodo} - Forma ingresso: {forma_ingresso}")
             
-            # Inicializar contadores
-            status_counter.markdown("**Total:** 0")
-            sucesso_counter.markdown("**✅ 0**")
-            erro_counter.markdown("**❌ 0**")
+            # Gerar relatório
+            resultado = gerador.gerar_relatorio_individual_com_progresso(
+                curso_config,
+                periodo,
+                forma_ingresso,
+                callback_progresso
+            )
             
-            # Inicializar lista de resultados
-            tabela_resultados = []
+            # Adicionar resultado
+            resultados[curso_nome].append(resultado)
             
-            # Função de callback para progresso
-            def callback_progresso(mensagem, progresso):
-                progress_bar.progress(progresso / 100)
-                status_text.text(mensagem)
+            # Atualizar interface
+            if resultado.get('success'):
+                sucessos += 1
+                adicionar_resultado(
+                    curso_nome,
+                    periodo,
+                    True,
+                    "Relatório gerado com sucesso"
+                )
+            else:
+                erros += 1
+                adicionar_resultado(
+                    curso_nome,
+                    periodo,
+                    False,
+                    resultado.get('error', 'Erro desconhecido')
+                )
             
-            # Função para adicionar resultado
-            def adicionar_resultado(curso, periodo, sucesso, mensagem=None):
-                periodo_display = f"{periodo[:4]}/{periodo[4:]}" if len(periodo) == 5 else periodo
-                
-                if sucesso:
-                    emoji = "✅"
-                    status = "Sucesso"
-                else:
-                    emoji = "❌"
-                    status = "Erro"
-                
-                tabela_resultados.append({
-                    'Curso': curso,
-                    'Período': periodo_display,
-                    'Status': f"{emoji} {status}",
-                    'Detalhe': mensagem or ''
-                })
-                
-                # Atualizar contadores
-                sucessos = sum(1 for r in tabela_resultados if '✅' in r['Status'])
-                erros = sum(1 for r in tabela_resultados if '❌' in r['Status'])
-                total = len(tabela_resultados)
-                
-                status_counter.markdown(f"**Total:** {total}")
-                sucesso_counter.markdown(f"**✅ {sucessos}**")
-                erro_counter.markdown(f"**❌ {erros}**")
-            
-            # Gerar relatórios
-            gerador = GeradorRelatoriosOtimizado(st.session_state.authenticator.session)
-            
-            # Obter cursos configurados
-            cursos_config = gerador.obter_cursos_predefinidos(st.session_state.selected_cursos)
-            
-            # Processar cada curso e período
-            resultados = {}
-            sucessos = 0
-            erros = 0
-            
-            for i, curso_config in enumerate(cursos_config):
-                curso_nome = curso_config['nome']
-                resultados[curso_nome] = []
-                
-                for periodo in periodos_lista:
-                    # Atualizar status
-                    callback_progresso(
-                        f"Gerando {curso_nome} - {periodo[:4]}/{periodo[4:]}",
-                        0
-                    )
-                    
-                    # Determinar forma de ingresso
-                    forma_ingresso = gerador._determinar_forma_ingresso(periodo)
-                    logger.info(f"Gerando relatório: {curso_nome} - {periodo} - Forma ingresso: {forma_ingresso}")
-                    
-                    # Gerar relatório
-                    resultado = gerador.gerar_relatorio_individual_com_progresso(
-                        curso_config,
-                        periodo,
-                        forma_ingresso,
-                        callback_progresso
-                    )
-                    
-                    # Adicionar resultado
-                    resultados[curso_nome].append(resultado)
-                    
-                    # Atualizar interface
-                    if resultado.get('success'):
-                        sucessos += 1
-                        adicionar_resultado(
-                            curso_nome,
-                            periodo,
-                            True,
-                            "Relatório gerado com sucesso"
-                        )
-                    else:
-                        erros += 1
-                        adicionar_resultado(
-                            curso_nome,
-                            periodo,
-                            False,
-                            resultado.get('error', 'Erro desconhecido')
-                        )
+            # Aguardar entre requisições
+            time.sleep(3)
+    
+    # Resto do código permanece igual...
                     
                     # Aguardar entre requisições
                     time.sleep(3)
