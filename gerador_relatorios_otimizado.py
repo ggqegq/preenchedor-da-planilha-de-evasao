@@ -35,6 +35,51 @@ class GeradorRelatoriosOtimizado:
             'status': ''
         }
     
+    def descobrir_valores_cursos(self):
+        """Descobre os valores corretos dos cursos analisando o formulário"""
+        try:
+            # Carregar a página do formulário
+            response = self.session.get(LISTAGEM_ALUNOS_URL)
+            
+            if response.status_code != 200:
+                logger.error(f"Falha ao carregar formulário: {response.status_code}")
+                return None
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Encontrar o select de cursos
+            select_curso = soup.find('select', {'id': 'idcurso'})
+            
+            if not select_curso:
+                logger.error("Select de cursos não encontrado")
+                return None
+            
+            logger.info("=== VALORES DISPONÍVEIS PARA CURSOS ===")
+            cursos_disponiveis = []
+            
+            for option in select_curso.find_all('option'):
+                if option.get('value') and option.get('value') != '':
+                    cursos_disponiveis.append({
+                        'value': option.get('value'),
+                        'text': option.text.strip()
+                    })
+                    logger.info(f"Value: '{option.get('value')}', Text: '{option.text.strip()}'")
+            
+            logger.info("=== VALORES DISPONÍVEIS PARA DESDOBRAMENTOS ===")
+            # Também verificar desdobramentos
+            select_desdobramento = soup.find('select', {'id': 'iddesdobramento'})
+            
+            if select_desdobramento:
+                for option in select_desdobramento.find_all('option'):
+                    if option.get('value') and option.get('value') != '':
+                        logger.info(f"Value: '{option.get('value')}', Text: '{option.text.strip()}'")
+            
+            return cursos_disponiveis
+            
+        except Exception as e:
+            logger.error(f"Erro ao descobrir valores: {str(e)}")
+            return None
+    
     def criar_filtros_para_curso(self, curso_config, periodo, forma_ingresso):
         """Cria dicionário de filtros para um curso específico"""
         logger.info(f"Criando filtros para: {curso_config['nome']} - {curso_config['codigo_curso']}:{curso_config['codigo_desdobramento']}")
@@ -61,7 +106,7 @@ class GeradorRelatoriosOtimizado:
         logger.info(f"Gerando relatório: {curso_config['nome']} - Período {periodo}")
         
         try:
-            # Atualizar status
+            # Primeiro, tentar descobrir os valores corretos se houver problema
             if callback_progresso:
                 callback_progresso(f"Preparando {curso_config['nome']} - {periodo[:4]}/{periodo[4:]}", 0)
             
@@ -259,30 +304,60 @@ class GeradorRelatoriosOtimizado:
     
     def obter_cursos_predefinidos(self, cursos_selecionados=None):
         """Retorna configuração dos cursos predefinidos"""
-        todos_cursos = [
-            {
+        # CORREÇÃO: Tentar descobrir os valores corretos primeiro
+        logger.info("Tentando descobrir valores corretos dos cursos...")
+        cursos_disponiveis = self.descobrir_valores_cursos()
+        
+        # Mapeamento dos cursos baseado no que descobrimos
+        mapeamento_cursos = {
+            'Química (Licenciatura)': {
                 'nome': 'Química (Licenciatura)',
-                'codigo_curso': '12700',  # Código do curso Química
-                'codigo_desdobramento': '12700',  # Desdobramento específico para Licenciatura
+                'codigo_curso': '12700',  # Valor para o curso Química
+                'codigo_desdobramento': '12700',  # Valor para licenciatura
                 'tipo': 'Licenciatura'
             },
-            {
+            'Química (Bacharelado)': {
                 'nome': 'Química (Bacharelado)',
-                'codigo_curso': '12700',  # Código do curso Química
-                'codigo_desdobramento': '312700',  # Desdobramento específico para Bacharelado
+                'codigo_curso': '12700',  # Mesmo curso
+                'codigo_desdobramento': '312700',  # Valor específico para bacharelado
                 'tipo': 'Bacharelado'
             },
-            {
+            'Química Industrial': {
                 'nome': 'Química Industrial',
-                'codigo_curso': '12709',  # Código do curso Química Industrial
-                'codigo_desdobramento': '12709',  # Desdobramento específico
+                'codigo_curso': '12709',  # Valor para Química Industrial
+                'codigo_desdobramento': '12709',  # Mesmo valor
                 'tipo': 'Bacharelado'
             }
-        ]
+        }
+        
+        # Se descobrimos os valores, usar os valores reais
+        if cursos_disponiveis:
+            logger.info("Valores descobertos, atualizando mapeamento...")
+            # Procurar os valores corretos nos cursos descobertos
+            for curso_info in cursos_disponiveis:
+                texto = curso_info['text']
+                valor = curso_info['value']
+                
+                if 'Química (Licenciatura)' in texto:
+                    mapeamento_cursos['Química (Licenciatura)']['codigo_curso'] = valor
+                    mapeamento_cursos['Química (Licenciatura)']['codigo_desdobramento'] = valor
+                elif 'Química (Bacharelado)' in texto:
+                    mapeamento_cursos['Química (Bacharelado)']['codigo_curso'] = valor
+                    # O desdobramento pode ser diferente
+                elif 'Química Industrial' in texto:
+                    mapeamento_cursos['Química Industrial']['codigo_curso'] = valor
+                    mapeamento_cursos['Química Industrial']['codigo_desdobramento'] = valor
+        
+        todos_cursos = list(mapeamento_cursos.values())
         
         if cursos_selecionados:
             cursos_filtrados = [c for c in todos_cursos if c['nome'] in cursos_selecionados]
             logger.info(f"Cursos selecionados: {[c['nome'] for c in cursos_filtrados]}")
+            
+            # Log dos códigos que serão usados
+            for curso in cursos_filtrados:
+                logger.info(f"  {curso['nome']}: curso={curso['codigo_curso']}, desdobramento={curso['codigo_desdobramento']}")
+            
             return cursos_filtrados
         
         logger.info(f"Todos os cursos selecionados: {[c['nome'] for c in todos_cursos]}")
