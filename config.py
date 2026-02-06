@@ -19,36 +19,38 @@ PARAMETROS_PADRAO = {
     'gerar_button': 'Gerar relatório em xlsx'
 }
 
-# Mapeamento de cursos
+# Mapeamento de cursos - ATUALIZADO com base no HTML
 CURSOS = {
     'quimica': {
         'nome': 'Química',
+        'codigo_curso': '12700',  # Código do curso no select
         'desdobramentos': {
             'licenciatura': {
-                'nome': 'Química (Licenciatura) (12700)',
-                'codigo': '12700'
+                'nome': 'Química (Licenciatura)',
+                'codigo_desdobramento': '12700'  # Mesmo código para licenciatura
             },
             'bacharelado': {
-                'nome': 'Química (Bacharelado) (312700)',
-                'codigo': '312700'
+                'nome': 'Química (Bacharelado)',
+                'codigo_desdobramento': '312700'  # Código diferente para bacharelado
             }
         }
     },
     'quimica_industrial': {
         'nome': 'Química Industrial',
+        'codigo_curso': '12709',  # Código do curso
         'desdobramentos': {
             'default': {
-                'nome': 'Química Industrial (12709)',
-                'codigo': '12709'
+                'nome': 'Química Industrial',
+                'codigo_desdobramento': '12709'  # Mesmo código
             }
         }
     }
 }
 
-# Formas de ingresso
+# Formas de ingresso - ATUALIZADO com base no HTML
 FORMAS_INGRESSO = {
-    '1': 'SISU 1ª Edição',
-    '2': 'SISU 2ª Edição',
+    '125': 'SISU 1ª Edição',
+    '124': 'SISU 2ª Edição',
     '-': '-'
 }
 
