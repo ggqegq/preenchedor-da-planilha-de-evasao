@@ -1,4 +1,4 @@
-# main.py - VERSÃO SIMPLIFICADA E CORRIGIDA
+# main.py - ATUALIZADO
 import streamlit as st
 import os
 import sys
@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from auth import UFFAuthenticator
+from gerador_relatorios import GeradorRelatorios, ProcessadorDadosRelatorios
 
 # URLs do sistema
 BASE_URL = "https://app.uff.br"
@@ -60,6 +61,16 @@ if 'mostrar_dados_coletados' not in st.session_state:
     st.session_state.mostrar_dados_coletados = False
 if 'consulta_em_andamento' not in st.session_state:
     st.session_state.consulta_em_andamento = False
+if 'gerador' not in st.session_state:
+    st.session_state.gerador = None
+if 'resultados_geracao' not in st.session_state:
+    st.session_state.resultados_geracao = {}
+if 'dados_consolidados' not in st.session_state:
+    st.session_state.dados_consolidados = None
+if 'planilha_gerada' not in st.session_state:
+    st.session_state.planilha_gerada = False
+if 'caminho_planilha' not in st.session_state:
+    st.session_state.caminho_planilha = ''
 
 # Função para extrair parâmetros do formulário
 def extract_form_parameters(session):
@@ -174,6 +185,13 @@ def comparar_periodos(periodo1, periodo2):
         else:
             return 0
 
+def converter_periodo_para_valor(periodo_texto):
+    """Converte texto de período para valor do sistema"""
+    ano, semestre = parse_periodo_texto(periodo_texto)
+    if ano and semestre:
+        return f"{ano}{semestre}"
+    return None
+
 # Título principal
 st.title("📊 Sistema de Análise de Evasão - UFF")
 st.markdown("---")
@@ -254,8 +272,10 @@ else:
         st.session_state.etapa_atual = 2
     elif not st.session_state.consulta_concluida:
         st.session_state.etapa_atual = 3
-    else:
+    elif st.session_state.consulta_concluida and not st.session_state.planilha_gerada:
         st.session_state.etapa_atual = 4
+    else:
+        st.session_state.etapa_atual = 5
     
     etapa_atual = st.session_state.etapa_atual
     
@@ -494,7 +514,7 @@ else:
     
     # ========== ETAPA 3 - Consulta de Relatórios ==========
     elif etapa_atual == 3:
-        st.markdown("## 🔍 Etapa 3 - Consulta de Relatórios")
+        st.markdown("## 🔍 Etapa 3 - Geração de Relatórios")
         
         # Verificar se há configuração salva
         if not st.session_state.selected_periodos or not st.session_state.selected_cursos:
@@ -513,6 +533,21 @@ else:
                     st.markdown(f"**Período:** {periodos['inicial']} a {periodos['final']}")
                     st.markdown(f"**Localidade:** {st.session_state.localidade_selecionada['text']}")
                     st.markdown(f"**Formas de Ingresso:** SISU 1ª e 2ª Edição")
+                    
+                    # Calcular total de relatórios
+                    periodo_inicial_valor = converter_periodo_para_valor(periodos['inicial'])
+                    periodo_final_valor = converter_periodo_para_valor(periodos['final'])
+                    
+                    if periodo_inicial_valor and periodo_final_valor:
+                        # Gerar lista de períodos
+                        gerador = GeradorRelatorios(st.session_state.authenticator.session)
+                        periodos_lista = gerador.processar_periodos_intervalo(
+                            periodo_inicial_valor, 
+                            periodo_final_valor
+                        )
+                        
+                        total_relatorios = len(cursos) * len(periodos_lista)
+                        st.markdown(f"**Total de relatórios:** {total_relatorios}")
                 
                 with col2:
                     st.markdown("**Cursos:**")
@@ -522,119 +557,283 @@ else:
             st.markdown("---")
             
             if not st.session_state.consulta_concluida:
-                st.markdown("### ⚙️ Preparar Consulta")
+                st.markdown("### ⚙️ Gerar Relatórios")
                 
                 # Informações sobre o processo
                 st.info("""
-                **O que acontecerá na consulta:**
-                1. Para cada curso selecionado, o sistema irá:
-                   - Buscar o código do curso no sistema UFF
-                   - Buscar o desdobramento correto
-                   - Configurar os parâmetros do relatório
-                   - Enviar solicitação de geração do relatório XLSX
-                
-                2. **Importante:** A geração de relatórios pode levar vários minutos
-                
-                3. O sistema monitorará automaticamente o processamento
-                
-                4. Quando pronto, fará o download do arquivo XLSX
+                **O que acontecerá na geração:**
+                1. Para cada curso selecionado, o sistema irá gerar relatórios para cada período
+                2. **Importante:** A geração pode levar vários minutos por relatório
+                3. O sistema monitorará automaticamente o processamento de cada relatório
+                4. Quando todos estiverem prontos, fará o download dos arquivos XLSX
+                5. Após o download, processará os dados para gerar estatísticas
                 """)
                 
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button("🚀 Iniciar Consulta de Relatórios", type="primary", use_container_width=True):
-                        st.info("🔧 Funcionalidade em desenvolvimento...")
-                        st.write("A funcionalidade completa será implementada na próxima etapa.")
-                        # Para testar rapidamente, você pode simular:
-                        if st.button("🧪 Simular Consulta (Teste)"):
-                            st.session_state.consulta_concluida = True
-                            st.session_state.relatorios_baixados = {
-                                'Química (Licenciatura)': {'status': 'sucesso', 'mensagem': 'Simulado - 150 registros'},
-                                'Química (Bacharelado)': {'status': 'sucesso', 'mensagem': 'Simulado - 120 registros'},
-                                'Química Industrial': {'status': 'sucesso', 'mensagem': 'Simulado - 80 registros'}
-                            }
-                            st.rerun()
+                if st.button("🚀 Iniciar Geração de Relatórios", type="primary", use_container_width=True):
+                    # Inicializar gerador
+                    st.session_state.gerador = GeradorRelatorios(st.session_state.authenticator.session)
+                    
+                    # Obter cursos predefinidos
+                    cursos_config = []
+                    for curso_obj in st.session_state.selected_cursos:
+                        # Mapear curso selecionado para configuração do gerador
+                        if 'Licenciatura' in curso_obj['nome']:
+                            cursos_config.append({
+                                'nome': curso_obj['nome'],
+                                'codigo_curso': '12700',
+                                'codigo_desdobramento': '12700',
+                                'tipo': 'Licenciatura'
+                            })
+                        elif 'Bacharelado' in curso_obj['nome'] and 'Industrial' not in curso_obj['nome']:
+                            cursos_config.append({
+                                'nome': curso_obj['nome'],
+                                'codigo_curso': '12700',
+                                'codigo_desdobramento': '312700',
+                                'tipo': 'Bacharelado'
+                            })
+                        elif 'Industrial' in curso_obj['nome']:
+                            cursos_config.append({
+                                'nome': curso_obj['nome'],
+                                'codigo_curso': '12709',
+                                'codigo_desdobramento': '12709',
+                                'tipo': 'Bacharelado'
+                            })
+                    
+                    # Gerar lista de períodos
+                    periodo_inicial_valor = converter_periodo_para_valor(periodos['inicial'])
+                    periodo_final_valor = converter_periodo_para_valor(periodos['final'])
+                    
+                    periodos_lista = st.session_state.gerador.processar_periodos_intervalo(
+                        periodo_inicial_valor, 
+                        periodo_final_valor
+                    )
+                    
+                    # Criar placeholder para progresso
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    # Gerar relatórios em lote
+                    total_gerar = len(cursos_config) * len(periodos_lista)
+                    gerados = 0
+                    
+                    for curso in cursos_config:
+                        status_text.text(f"Gerando relatórios para: {curso['nome']}")
+                        
+                        for periodo in periodos_lista:
+                            # Atualizar progresso
+                            progresso = gerados / total_gerar
+                            progress_bar.progress(progresso)
+                            
+                            status_text.text(f"Curso: {curso['nome']} - Período: {periodo[:4]}/{periodo[4:]}")
+                            
+                            # Gerar relatório individual
+                            resultado = st.session_state.gerador.gerar_relatorio_individual(
+                                curso, 
+                                periodo, 
+                                st.session_state.gerador._determinar_forma_ingresso(periodo)
+                            )
+                            
+                            # Armazenar resultado
+                            if curso['nome'] not in st.session_state.resultados_geracao:
+                                st.session_state.resultados_geracao[curso['nome']] = []
+                            
+                            st.session_state.resultados_geracao[curso['nome']].append(resultado)
+                            gerados += 1
+                            
+                            time.sleep(2)  # Aguardar entre requisições
+                    
+                    # Finalizar
+                    progress_bar.progress(1.0)
+                    status_text.text("✅ Geração de relatórios concluída!")
+                    
+                    st.session_state.consulta_concluida = True
+                    time.sleep(2)
+                    st.rerun()
                 
-                with col2:
-                    if st.button("🔄 Voltar para Configuração", type="secondary", use_container_width=True):
-                        st.session_state.selected_periodos = {}
-                        st.session_state.selected_cursos = []
-                        st.session_state.etapa_atual = 2
-                        st.rerun()
+                # Botão para refazer configuração
+                if st.button("🔄 Alterar Configuração", type="secondary", use_container_width=True):
+                    st.session_state.selected_periodos = {}
+                    st.session_state.selected_cursos = []
+                    st.session_state.etapa_atual = 2
+                    st.rerun()
             
             # Se consulta foi concluída
             elif st.session_state.consulta_concluida:
-                st.markdown("### 📊 Resultados da Consulta")
+                st.markdown("### 📊 Resultados da Geração")
                 
-                if st.session_state.relatorios_baixados:
-                    st.success("✅ Consulta concluída com sucesso!")
+                if st.session_state.resultados_geracao:
+                    st.success("✅ Geração de relatórios concluída!")
                     
                     # Mostrar resultados
-                    for curso_nome, resultado in st.session_state.relatorios_baixados.items():
-                        if resultado['status'] == 'sucesso':
-                            st.info(f"**{curso_nome}:** {resultado['mensagem']}")
-                        else:
-                            st.error(f"**{curso_nome}:** {resultado.get('mensagem', 'Erro')}")
+                    totais = {
+                        'sucesso': 0,
+                        'erro': 0,
+                        'total': 0
+                    }
+                    
+                    for curso_nome, resultados_curso in st.session_state.resultados_geracao.items():
+                        st.markdown(f"**{curso_nome}:**")
+                        
+                        for resultado in resultados_curso:
+                            periodo_display = resultado.get('periodo', 'Desconhecido')
+                            if len(periodo_display) == 5:
+                                periodo_display = f"{periodo_display[:4]}/{periodo_display[4:]}"
+                            
+                            if resultado.get('success'):
+                                st.info(f"  ✅ Período {periodo_display}: Relatório gerado com sucesso")
+                                totais['sucesso'] += 1
+                            else:
+                                st.error(f"  ❌ Período {periodo_display}: {resultado.get('error', 'Erro desconhecido')}")
+                                totais['erro'] += 1
+                            
+                            totais['total'] += 1
+                    
+                    # Resumo
+                    st.markdown("---")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Relatórios Gerados", totais['sucesso'])
+                    with col2:
+                        st.metric("Relatórios com Erro", totais['erro'])
+                    with col3:
+                        percentual = (totais['sucesso'] / totais['total'] * 100) if totais['total'] > 0 else 0
+                        st.metric("Taxa de Sucesso", f"{percentual:.1f}%")
                     
                     # Botão para avançar
-                    if st.button("🚀 Avançar para Etapa 4", type="primary", use_container_width=True):
+                    if st.button("📊 Processar Dados e Gerar Estatísticas", type="primary", use_container_width=True):
                         st.session_state.etapa_atual = 4
                         st.rerun()
                     
                     # Botão para refazer
-                    if st.button("🔄 Refazer Consulta", type="secondary", use_container_width=True):
+                    if st.button("🔄 Gerar Novamente", type="secondary", use_container_width=True):
                         st.session_state.consulta_concluida = False
-                        st.session_state.relatorios_baixados = {}
+                        st.session_state.resultados_geracao = {}
                         st.rerun()
                 else:
-                    st.warning("Consulta concluída, mas nenhum resultado encontrado.")
+                    st.warning("Geração concluída, mas nenhum resultado encontrado.")
     
     # ========== ETAPA 4 - Processamento dos Dados ==========
-    elif etapa_atual >= 4:
+    elif etapa_atual == 4:
         st.markdown("## ⚙️ Etapa 4 - Processamento dos Dados")
         
-        st.info("""
-        **Etapa 4 - Processamento dos Dados**
-        
-        Aqui os dados coletados serão processados para análise de evasão.
-        
-        **Próximos passos a serem implementados:**
-        
-        1. **Normalização de legendas**:
-           - "Inscrito", "Concluinte", "Pendente" → Inscritos/Pendentes/Concluintes
-        
-        2. **Cálculo de matrículas ativas**:
-           - Inscritos + Pendentes + Concluintes + Trancados
-        
-        3. **Classificação de cancelamentos**:
-           - Solicitação Oficial
-           - Abandono  
-           - Insuficiência de Aproveitamento
-           - Ingressante - Insuf. Aproveit.
-           - Mudança de Curso
-           - Outros
-        
-        4. **Separação por modalidade**:
-           - Código começando com "A" → Ampla Concorrência
-           - Código começando com "L" → Ações Afirmativas
-        
-        5. **Cálculo de taxa de evasão**:
-           - Percentual por curso
-           - Percentual por motivo de cancelamento
-        """)
-        
-        # Botões de controle
-        col1, col2 = st.columns(2)
-        
-        with col1:
+        if not st.session_state.resultados_geracao:
+            st.error("Nenhum dado para processar. Volte para a Etapa 3.")
+            if st.button("🔙 Voltar para Etapa 3"):
+                st.session_state.etapa_atual = 3
+                st.rerun()
+        else:
+            st.info("""
+            **Processamento em andamento:**
+            1. **Lendo relatórios** baixados
+            2. **Extraindo dados** de matrículas, cancelamentos e situações
+            3. **Classificando** por modalidade de ingresso (Ampla Concorrência / Ações Afirmativas)
+            4. **Calculando percentuais** e estatísticas
+            5. **Gerando planilha consolidada** com todas as informações
+            """)
+            
+            if st.button("▶️ Iniciar Processamento", type="primary", use_container_width=True):
+                with st.spinner("Processando dados dos relatórios..."):
+                    # Processar dados
+                    processador = ProcessadorDadosRelatorios()
+                    
+                    # Consolidar dados de todos os relatórios
+                    st.session_state.dados_consolidados = processador.consolidar_dados_todos_relatorios(
+                        st.session_state.resultados_geracao
+                    )
+                    
+                    # Gerar planilha
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    caminho_planilha = os.path.join(PASTA_RELATORIOS, f"estatisticas_evasao_{timestamp}.xlsx")
+                    
+                    sucesso = processador.gerar_planilha_consolidada(
+                        st.session_state.dados_consolidados,
+                        caminho_planilha
+                    )
+                    
+                    if sucesso:
+                        st.session_state.planilha_gerada = True
+                        st.session_state.caminho_planilha = caminho_planilha
+                        st.session_state.etapa_atual = 5
+                        st.success("✅ Processamento concluído com sucesso!")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("❌ Erro ao gerar planilha consolidada.")
+            
             if st.button("🔙 Voltar para Etapa 3", type="secondary", use_container_width=True):
                 st.session_state.etapa_atual = 3
                 st.rerun()
+    
+    # ========== ETAPA 5 - Planilha Final ==========
+    elif etapa_atual >= 5:
+        st.markdown("## 📊 Etapa 5 - Planilha Consolidada")
         
-        with col2:
-            if st.button("🚀 Simular Processamento", type="primary", use_container_width=True):
-                st.success("✅ Processamento simulado com sucesso!")
-                st.session_state.etapa_atual = 5
+        if st.session_state.planilha_gerada and st.session_state.caminho_planilha:
+            st.success("✅ Planilha gerada com sucesso!")
+            
+            # Mostrar resumo dos dados
+            if st.session_state.dados_consolidados:
+                resumo = st.session_state.dados_consolidados.get('resumo_geral', {})
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total de Cursos", resumo.get('total_cursos', 0))
+                with col2:
+                    st.metric("Total de Períodos", resumo.get('total_periodos', 0))
+                with col3:
+                    st.metric("Total de Matrículas", resumo.get('total_matriculas', 0))
+                with col4:
+                    st.metric("Total Cancelamentos", resumo.get('total_cancelamentos', 0))
+                
+                # Botão para download
+                with open(st.session_state.caminho_planilha, 'rb') as f:
+                    st.download_button(
+                        label="📥 Baixar Planilha Consolidada",
+                        data=f,
+                        file_name=os.path.basename(st.session_state.caminho_planilha),
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        type="primary",
+                        use_container_width=True
+                    )
+                
+                # Mostrar preview da planilha
+                with st.expander("🔍 Visualizar Estrutura da Planilha", expanded=False):
+                    try:
+                        # Ler a planilha para mostrar abas
+                        xls = pd.ExcelFile(st.session_state.caminho_planilha)
+                        st.info(f"**Abas disponíveis:** {', '.join(xls.sheet_names)}")
+                        
+                        # Mostrar preview da primeira aba
+                        df_preview = pd.read_excel(st.session_state.caminho_planilha, sheet_name='RESUMO GERAL')
+                        st.dataframe(df_preview, use_container_width=True)
+                    except Exception as e:
+                        st.warning(f"Não foi possível visualizar a planilha: {str(e)}")
+            
+            # Botões de controle
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🔄 Processar Novamente", type="secondary", use_container_width=True):
+                    st.session_state.planilha_gerada = False
+                    st.session_state.caminho_planilha = ''
+                    st.session_state.etapa_atual = 4
+                    st.rerun()
+            
+            with col2:
+                if st.button("🏁 Novo Processo", type="primary", use_container_width=True):
+                    # Resetar apenas dados do processo atual
+                    st.session_state.selected_periodos = {}
+                    st.session_state.selected_cursos = []
+                    st.session_state.consulta_concluida = False
+                    st.session_state.resultados_geracao = {}
+                    st.session_state.dados_consolidados = None
+                    st.session_state.planilha_gerada = False
+                    st.session_state.caminho_planilha = ''
+                    st.session_state.etapa_atual = 2
+                    st.rerun()
+        else:
+            st.warning("Planilha ainda não foi gerada.")
+            if st.button("🔙 Voltar para Etapa 4"):
+                st.session_state.etapa_atual = 4
                 st.rerun()
 
 # Rodapé
